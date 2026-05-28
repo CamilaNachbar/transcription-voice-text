@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import warnings
 import threading
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,13 @@ from .config import AppConfig
 from .speech_segmenter import SegmenterParams, SpeechSegmenter
 
 logger = logging.getLogger(__name__)
+
+try:
+    from soundcard import SoundcardRuntimeWarning
+
+    warnings.simplefilter("ignore", SoundcardRuntimeWarning)
+except ImportError:
+    pass
 
 
 @dataclass

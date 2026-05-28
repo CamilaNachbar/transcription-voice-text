@@ -49,9 +49,12 @@ class AppConfig:
     speaker_match_threshold: float = 0.72
     within_segment_threshold: float = 0.68
     max_speakers: int = 8
-    # Assistente por palavra-gatilho (ex.: «CAMILA»)
+    # Assistente por palavra-gatilho
     wake_assistant_enabled: bool = True
-    wake_words: tuple[str, ...] = ("CAMILA",)
+    wake_user_phrase: str = "CAMILA"
+    wake_ai_phrase: str = "gatinho de IA"
+    wake_words: tuple[str, ...] = ("CAMILA", "gatinho de IA")
+    wake_assistant_user_name: str = "Camila"
     wake_cooldown_seconds: float = 45.0
     wake_min_lines: int = 1
     session_root: Path = Path("data") / "sessions"
@@ -125,9 +128,23 @@ class AppConfig:
             "wake_assistant_enabled",
             os.getenv("WAKE_ASSISTANT_ENABLED", "true").strip().lower() in ("1", "true", "yes"),
         )
-        raw_wake = os.getenv("WAKE_WORDS", "CAMILA")
-        words = tuple(w.strip() for w in raw_wake.split(",") if w.strip()) or ("CAMILA",)
-        object.__setattr__(self, "wake_words", words)
+        from .wake_assistant import build_wake_words
+
+        user_phrase = os.getenv("WAKE_USER_PHRASE", "CAMILA").strip() or "CAMILA"
+        ai_phrase = os.getenv("WAKE_AI_PHRASE", "gatinho de IA").strip() or "gatinho de IA"
+        if os.getenv("WAKE_WORDS"):
+            legacy = tuple(w.strip() for w in os.getenv("WAKE_WORDS", "").split(",") if w.strip())
+            if legacy:
+                user_phrase = legacy[0]
+                ai_phrase = legacy[1] if len(legacy) > 1 else ai_phrase
+        object.__setattr__(self, "wake_user_phrase", user_phrase)
+        object.__setattr__(self, "wake_ai_phrase", ai_phrase)
+        object.__setattr__(self, "wake_words", build_wake_words(user_phrase, ai_phrase))
+        object.__setattr__(
+            self,
+            "wake_assistant_user_name",
+            os.getenv("WAKE_ASSISTANT_USER_NAME", "Camila").strip() or "Camila",
+        )
         object.__setattr__(
             self,
             "wake_cooldown_seconds",
@@ -145,9 +162,21 @@ def _env_llm_provider() -> LLMProviderMode:
 
 def load_app_config() -> AppConfig:
     """Config base (.env) com preferência da UI, se existir."""
-    from .user_settings import load_llm_provider
+    from .user_settings import load_llm_provider, load_wake_ai_phrase, load_wake_user_phrase
+    from .wake_assistant import build_wake_words
 
     config = AppConfig()
+    user_phrase = load_wake_user_phrase()
+    ai_phrase = load_wake_ai_phrase()
+    if user_phrase is not None or ai_phrase is not None:
+        user = user_phrase if user_phrase is not None else config.wake_user_phrase
+        ai = ai_phrase if ai_phrase is not None else config.wake_ai_phrase
+        config = replace(
+            config,
+            wake_user_phrase=user,
+            wake_ai_phrase=ai,
+            wake_words=build_wake_words(user, ai),
+        )
     override = load_llm_provider()
     if override is not None:
         return replace(config, llm_provider=override)

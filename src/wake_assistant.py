@@ -7,19 +7,36 @@ from dataclasses import dataclass, field
 from .transcriber import TranscriptLine
 
 
+DEFAULT_WAKE_PHRASES = ("CAMILA", "gatinho de IA")
+DEFAULT_WAKE_USER_PHRASE = "CAMILA"
+DEFAULT_WAKE_AI_PHRASE = "gatinho de IA"
+
+
+def build_wake_words(user_phrase: str, ai_phrase: str) -> tuple[str, ...]:
+    parts = [p.strip() for p in (user_phrase, ai_phrase) if p and p.strip()]
+    return tuple(parts) if parts else DEFAULT_WAKE_PHRASES
+
+
+def is_ai_wake_phrase(detected: str, ai_phrase: str) -> bool:
+    return detected.strip().lower() == ai_phrase.strip().lower()
+
+
 def parse_wake_words(raw: str) -> list[str]:
     words = [w.strip() for w in raw.split(",") if w.strip()]
-    return words or ["CAMILA"]
+    return words or list(DEFAULT_WAKE_PHRASES)
 
 
 def contains_wake_word(text: str, wake_words: list[str]) -> str | None:
-    """Retorna a palavra detectada ou None."""
-    normalized = text.lower()
-    for word in wake_words:
-        pattern = rf"\b{re.escape(word.lower())}\b"
-        if re.search(pattern, normalized):
-            return word
+    """Retorna a frase-gatilho detectada (ex.: CAMILA ou gatinho de IA)."""
+    normalized = re.sub(r"\s+", " ", text.lower()).strip()
+    for phrase in sorted(wake_words, key=len, reverse=True):
+        if phrase.lower() in normalized:
+            return phrase
     return None
+
+
+def format_wake_phrases_label(wake_words: list[str] | tuple[str, ...]) -> str:
+    return "» ou «".join(wake_words)
 
 
 def format_transcript(lines: list[TranscriptLine], *, max_lines: int = 80) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 from dataclasses import replace
@@ -19,10 +20,15 @@ from .transcription_pipeline import TranscriptionPipeline
 from .transcriber import TranscriptLine, WhisperTranscriber
 from .wake_assistant import (
   WakeTriggerState,
+  build_wake_words,
   contains_wake_word,
   format_transcript,
+  format_wake_phrases_label,
+  is_ai_wake_phrase,
 )
+from .ui.components import card, field_label, hint_label, section_header
 from .ui.formatting import format_session_label
+from .ui.theme import THEME
 from .user_settings import (
   load_appearance_mode,
   load_capture_system_audio,
@@ -35,32 +41,45 @@ from .user_settings import (
   save_loopback_device_id,
   save_microphone_device_id,
   save_wake_assistant_enabled,
+  save_wake_phrases,
 )
 
-WELCOME_TEXT = """Bem-vindo ao Transcritor de Reuniões
+WELCOME_TEXT = """Olá! Bem-vindo ao Transcritor de Reuniões
 
-Reuniões online (Teams, Meet, Zoom, navegador):
-• Microfone → «Você».
-• Áudio da reunião → tenta separar Participante A, B, C… por timbre de voz.
-• Use fone de ouvido para evitar eco (microfone pegando o mesmo som duas vezes).
-• Em «Participantes», escolha o mesmo dispositivo de saída do Windows e do Teams.
-• Com «Ativar IA ao ouvir CAMILA», a IA resume a reunião e sugere uma resposta quando alguém disser seu nome.
+Este aplicativo transcreve suas calls em tempo real e gera resumo com IA.
 
-Clique em "Iniciar reunião" para começar. Ao parar, geramos transcrição e resumo em .txt.
+
+COMO COMEÇAR
+
+  1. Confira as abas «Áudio» e «Inteligência artificial» abaixo
+  2. Clique em «Iniciar reunião»
+  3. Participe da call (Teams, Meet, Zoom ou navegador)
+  4. Clique em «Parar e salvar» para gerar os arquivos .txt
+
+
+DURANTE A REUNIÃO
+
+  • Você — sua voz (microfone)
+  • Participante A, B, C… — outras pessoas na call
+  • Configure seu nome e o nome do assistente de IA (aba Inteligência artificial)
+
+Dica: use fone de ouvido e alinhe o dispositivo de saída do Windows com a aba Áudio.
 """
 
 
 class DesktopTranscriberApp:
-  STATUS_IDLE = ("Parado", "#6c757d")
-  STATUS_RECORDING = ("Gravando", "#dc3545")
-  STATUS_PROCESSING = ("Processando", "#0d6efd")
-  STATUS_DONE = ("Pronto", "#198754")
+  STATUS_IDLE = ("Parado", THEME.status_idle)
+  STATUS_RECORDING = ("●  Gravando", THEME.status_recording)
+  STATUS_PROCESSING = ("Processando…", THEME.status_processing)
+  STATUS_DONE = ("Pronto", THEME.status_done)
 
   def __init__(self) -> None:
     appearance = load_appearance_mode() or "system"
     ctk.set_appearance_mode(appearance)
     ctk.set_default_color_theme("blue")
+    ctk.set_widget_scaling(1.0)
 
+    self.theme = THEME
     self.config = load_app_config()
     self.store = SessionStore(self.config)
     self.capture: AudioCaptureService | None = None
@@ -72,8 +91,9 @@ class DesktopTranscriberApp:
 
     self.root = ctk.CTk()
     self.root.title("Transcritor de Reuniões")
-    self.root.geometry("1100x700")
-    self.root.minsize(960, 620)
+    self.root.geometry("1180x780")
+    self.root.minsize(1000, 680)
+    self.root.configure(fg_color=self.theme.bg)
 
     self.running = False
     self.worker: threading.Thread | None = None
@@ -85,6 +105,7 @@ class DesktopTranscriberApp:
     self._session_buttons: dict[str, ctk.CTkButton] = {}
     self._wake_state = WakeTriggerState()
     self._llm_test_running = False
+    self._stopping = False
     wake_pref = load_wake_assistant_enabled()
     if wake_pref is not None:
       self.config = replace(self.config, wake_assistant_enabled=wake_pref)
@@ -96,132 +117,155 @@ class DesktopTranscriberApp:
     self._show_welcome()
 
   def _build_ui(self) -> None:
+    t = self.theme
+    pad = {"padx": 20}
+
     self.root.grid_columnconfigure(0, weight=1)
     self.root.grid_rowconfigure(2, weight=1)
-    self.root.grid_rowconfigure(3, weight=0)
 
     # --- Cabeçalho ---
-    header = ctk.CTkFrame(self.root, fg_color="transparent")
-    header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 8))
+    header = card(self.root, theme=t)
+    header.grid(row=0, column=0, sticky="ew", pady=(16, 0), **pad)
 
-    title = ctk.CTkLabel(
-      header,
-      text="Transcritor de Reuniões",
-      font=ctk.CTkFont(size=26, weight="bold"),
-    )
-    title.pack(anchor="w")
+    header_inner = ctk.CTkFrame(header, fg_color="transparent")
+    header_inner.pack(fill="x", padx=20, pady=16)
+
+    brand = ctk.CTkFrame(header_inner, fg_color="transparent")
+    brand.pack(side="left", fill="x", expand=True)
+
     ctk.CTkLabel(
-      header,
-      text="Captura local · Whisper · Resumo com Claude",
-      font=ctk.CTkFont(size=13),
-      text_color="gray55",
-    ).pack(anchor="w", pady=(2, 0))
+      brand,
+      text="Transcritor de Reuniões",
+      font=t.ctk_font(t.font_title()),
+      text_color=t.text,
+    ).pack(anchor="w")
+    ctk.CTkLabel(
+      brand,
+      text="Transcrição ao vivo · Perfis de voz · Resumo com IA",
+      font=t.ctk_font(t.font_subtitle()),
+      text_color=t.text_muted,
+    ).pack(anchor="w", pady=(4, 0))
 
-    # --- Barra de ações ---
-    toolbar = ctk.CTkFrame(self.root, corner_radius=12)
-    toolbar.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
+    status_row = ctk.CTkFrame(header_inner, fg_color="transparent")
+    status_row.pack(side="right")
 
-    actions = ctk.CTkFrame(toolbar, fg_color="transparent")
-    actions.pack(side="left", fill="y", padx=16, pady=14)
+    self.progress = ctk.CTkProgressBar(
+      status_row,
+      width=120,
+      height=8,
+      mode="indeterminate",
+      progress_color=t.primary,
+    )
+
+    self.status_badge = ctk.CTkLabel(
+      status_row,
+      text="Parado",
+      width=130,
+      height=36,
+      corner_radius=t.radius_pill,
+      font=t.ctk_font(t.font_section()),
+      fg_color=t.status_idle,
+      text_color="#ffffff",
+    )
+    self.status_badge.pack(side="right")
+
+    # --- Ações principais ---
+    toolbar = card(self.root, theme=t)
+    toolbar.grid(row=1, column=0, sticky="ew", pady=(12, 0), **pad)
+
+    toolbar_inner = ctk.CTkFrame(toolbar, fg_color="transparent")
+    toolbar_inner.pack(fill="x", padx=16, pady=14)
+
+    actions = ctk.CTkFrame(toolbar_inner, fg_color="transparent")
+    actions.pack(side="left")
 
     self.start_btn = ctk.CTkButton(
       actions,
-      text="▶  Iniciar reunião",
-      width=160,
-      height=40,
-      font=ctk.CTkFont(size=14, weight="bold"),
-      fg_color="#198754",
-      hover_color="#157347",
+      text="Iniciar reunião",
+      width=180,
+      height=44,
+      corner_radius=t.radius_sm,
+      font=t.ctk_font(t.font_button()),
+      fg_color=t.success,
+      hover_color=t.success_hover,
       command=self.start,
     )
     self.start_btn.pack(side="left", padx=(0, 10))
 
     self.stop_btn = ctk.CTkButton(
       actions,
-      text="■  Parar e salvar",
-      width=160,
-      height=40,
-      font=ctk.CTkFont(size=14, weight="bold"),
-      fg_color="#dc3545",
-      hover_color="#bb2d3b",
+      text="Parar e salvar",
+      width=180,
+      height=44,
+      corner_radius=t.radius_sm,
+      font=t.ctk_font(t.font_button()),
+      fg_color=t.danger,
+      hover_color=t.danger_hover,
       command=self.stop,
       state="disabled",
     )
     self.stop_btn.pack(side="left")
 
-    status_frame = ctk.CTkFrame(toolbar, fg_color="transparent")
-    status_frame.pack(side="right", padx=20, pady=14)
-
-    self.status_badge = ctk.CTkLabel(
-      status_frame,
-      text="Parado",
-      width=120,
-      height=32,
-      corner_radius=16,
-      font=ctk.CTkFont(size=13, weight="bold"),
-      fg_color="#6c757d",
-    )
-    self.status_badge.pack(side="right")
-
-    self.progress = ctk.CTkProgressBar(status_frame, width=140, mode="indeterminate")
-    self.progress.pack(side="right", padx=(0, 12))
-    self.progress.pack_forget()
+    hint_label(
+      toolbar_inner,
+      "A transcrição aparece ao lado enquanto você fala.",
+      theme=t,
+    ).pack(side="right", padx=(0, 16))
 
     # --- Área principal ---
     main = ctk.CTkFrame(self.root, fg_color="transparent")
-    main.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 12))
+    main.grid(row=2, column=0, sticky="nsew", pady=(12, 0), **pad)
     main.grid_columnconfigure(1, weight=1)
     main.grid_rowconfigure(0, weight=1)
 
-    # Sidebar
-    sidebar = ctk.CTkFrame(main, width=300, corner_radius=12)
+    sidebar = card(main, theme=t)
     sidebar.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+    sidebar.configure(width=280)
     sidebar.grid_propagate(False)
 
-    ctk.CTkLabel(
+    section_header(
       sidebar,
-      text="Histórico",
-      font=ctk.CTkFont(size=15, weight="bold"),
-    ).pack(anchor="w", padx=16, pady=(16, 4))
+      "Histórico",
+      "Reuniões salvas na sua máquina",
+      theme=t,
+    ).pack(anchor="w", padx=16, pady=(16, 8))
 
-    ctk.CTkLabel(
-      sidebar,
-      text="Reuniões salvas por data e hora",
-      font=ctk.CTkFont(size=11),
-      text_color="gray55",
-    ).pack(anchor="w", padx=16, pady=(0, 8))
-
-    self.sessions_scroll = ctk.CTkScrollableFrame(sidebar, fg_color="transparent")
-    self.sessions_scroll.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+    self.sessions_scroll = ctk.CTkScrollableFrame(
+      sidebar, fg_color="transparent", scrollbar_button_color=t.border,
+    )
+    self.sessions_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
     self.empty_sessions_label = ctk.CTkLabel(
       self.sessions_scroll,
-      text="Nenhuma sessão ainda.\nInicie uma reunião para começar.",
-      font=ctk.CTkFont(size=12),
-      text_color="gray55",
+      text="Nenhuma reunião salva ainda.\n\nClique em «Iniciar reunião»\npara começar.",
+      font=t.ctk_font(t.font_body()),
+      text_color=t.text_muted,
       justify="center",
     )
 
     session_actions = ctk.CTkFrame(sidebar, fg_color="transparent")
-    session_actions.pack(fill="x", padx=12, pady=(0, 8))
+    session_actions.pack(fill="x", padx=12, pady=(0, 14))
 
-    refresh_btn = ctk.CTkButton(
+    ctk.CTkButton(
       session_actions,
       text="Atualizar lista",
-      height=32,
-      fg_color="transparent",
+      height=34,
+      corner_radius=t.radius_sm,
+      fg_color=t.surface_alt,
+      hover_color=t.border,
+      text_color=t.text,
       border_width=1,
-      text_color=("gray20", "gray80"),
+      border_color=t.border,
       command=self._refresh_session_list,
-    )
-    refresh_btn.pack(fill="x", pady=(0, 6))
+    ).pack(fill="x", pady=(0, 6))
 
     self.delete_session_btn = ctk.CTkButton(
       session_actions,
       text="Apagar selecionada",
-      height=32,
-      fg_color="#dc3545",
-      hover_color="#bb2d3b",
+      height=34,
+      corner_radius=t.radius_sm,
+      fg_color=t.danger,
+      hover_color=t.danger_hover,
       command=self._delete_selected_session,
     )
     self.delete_session_btn.pack(fill="x", pady=(0, 6))
@@ -229,177 +273,220 @@ class DesktopTranscriberApp:
     self.delete_all_btn = ctk.CTkButton(
       session_actions,
       text="Apagar todas",
-      height=32,
+      height=34,
+      corner_radius=t.radius_sm,
       fg_color="transparent",
       border_width=1,
-      border_color="#dc3545",
-      text_color="#dc3545",
-      hover_color=("gray90", "gray20"),
+      border_color=t.danger,
+      text_color=t.danger,
+      hover_color=t.danger_soft,
       command=self._delete_all_sessions,
     )
-    self.delete_all_btn.pack(fill="x", pady=(0, 4))
+    self.delete_all_btn.pack(fill="x")
 
-    # Painel de conteúdo
-    content = ctk.CTkFrame(main, corner_radius=12)
+    content = card(main, theme=t)
     content.grid(row=0, column=1, sticky="nsew")
     content.grid_columnconfigure(0, weight=1)
     content.grid_rowconfigure(1, weight=1)
 
     content_header = ctk.CTkFrame(content, fg_color="transparent")
-    content_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+    content_header.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 6))
 
     self.content_title = ctk.CTkLabel(
       content_header,
       text="Transcrição",
-      font=ctk.CTkFont(size=15, weight="bold"),
+      font=t.ctk_font(t.font_section()),
+      text_color=t.text,
     )
     self.content_title.pack(side="left")
 
     self.line_count_label = ctk.CTkLabel(
       content_header,
       text="",
-      font=ctk.CTkFont(size=12),
-      text_color="gray55",
+      font=t.ctk_font(t.font_small()),
+      text_color=t.text_muted,
     )
     self.line_count_label.pack(side="right")
 
     self.live_text = ctk.CTkTextbox(
       content,
-      font=ctk.CTkFont(size=14),
+      font=t.ctk_font(t.font_body()),
       wrap="word",
-      corner_radius=8,
+      corner_radius=t.radius_sm,
+      fg_color=t.surface_alt,
+      border_width=1,
+      border_color=t.border,
     )
-    self.live_text.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+    self.live_text.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 16))
 
-    # --- Áudio: dispositivos ---
-    audio_bar = ctk.CTkFrame(self.root, corner_radius=12)
-    audio_bar.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 8))
+    # --- Configurações em abas ---
+    self.settings_tabs = ctk.CTkTabview(
+      self.root,
+      height=200,
+      corner_radius=t.radius_md,
+      fg_color=t.surface,
+      segmented_button_fg_color=t.surface_alt,
+      segmented_button_selected_color=t.primary,
+      segmented_button_unselected_color=t.surface_alt,
+    )
+    self.settings_tabs.grid(row=3, column=0, sticky="ew", pady=(12, 16), **pad)
 
-    audio_inner = ctk.CTkFrame(audio_bar, fg_color="transparent")
-    audio_inner.pack(fill="x", padx=16, pady=12)
+    tab_audio = self.settings_tabs.add("  Áudio  ")
+    tab_ai = self.settings_tabs.add("  Inteligência artificial  ")
 
-    ctk.CTkLabel(
+    # Aba Áudio
+    audio_inner = ctk.CTkFrame(tab_audio, fg_color="transparent")
+    audio_inner.pack(fill="both", expand=True, padx=12, pady=12)
+    audio_inner.grid_columnconfigure(1, weight=1)
+    audio_inner.grid_columnconfigure(3, weight=1)
+
+    section_header(
       audio_inner,
-      text="Entrada de áudio",
-      font=ctk.CTkFont(size=12, weight="bold"),
-    ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+      "Dispositivos de captura",
+      "Use o mesmo alto-falante do Teams/Windows em «Participantes».",
+      theme=t,
+    ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 12))
 
-    ctk.CTkLabel(audio_inner, text="Microfone", font=ctk.CTkFont(size=11)).grid(
-      row=1, column=0, sticky="w", padx=(0, 8),
+    field_label(audio_inner, "Sua voz (microfone)", theme=t).grid(
+      row=1, column=0, sticky="w", padx=(0, 10),
     )
     self.mic_menu = ctk.CTkOptionMenu(
-      audio_inner, width=320, command=self._on_mic_device_changed,
+      audio_inner, width=280, height=34, command=self._on_mic_device_changed,
     )
-    self.mic_menu.grid(row=1, column=1, sticky="w", padx=(0, 20))
+    self.mic_menu.grid(row=1, column=1, sticky="ew", padx=(0, 24))
 
-    ctk.CTkLabel(
-      audio_inner,
-      text="Participantes (Teams, Meet…)",
-      font=ctk.CTkFont(size=11),
-    ).grid(row=1, column=2, sticky="w", padx=(0, 8))
-    self.loopback_menu = ctk.CTkOptionMenu(
-      audio_inner, width=320, command=self._on_loopback_device_changed,
+    field_label(audio_inner, "Participantes na call", theme=t).grid(
+      row=1, column=2, sticky="w", padx=(0, 10),
     )
-    self.loopback_menu.grid(row=1, column=3, sticky="w")
+    self.loopback_menu = ctk.CTkOptionMenu(
+      audio_inner, width=280, height=34, command=self._on_loopback_device_changed,
+    )
+    self.loopback_menu.grid(row=1, column=3, sticky="ew")
 
     self.system_audio_switch = ctk.CTkSwitch(
       audio_inner,
-      text="Capturar voz dos participantes (áudio da reunião no PC)",
+      text="Capturar voz dos participantes (Teams, Meet, Zoom…)",
+      font=t.ctk_font(t.font_body()),
       command=self._on_system_audio_toggled,
     )
-    self.system_audio_switch.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+    self.system_audio_switch.grid(row=2, column=0, columnspan=2, sticky="w", pady=(14, 0))
     if load_capture_system_audio():
       self.system_audio_switch.select()
     else:
       self.system_audio_switch.deselect()
 
-    self.audio_status = ctk.CTkLabel(
-      audio_inner,
-      text="",
-      font=ctk.CTkFont(size=11),
-      text_color="gray55",
-      anchor="w",
-      justify="left",
-    )
-    self.audio_status.grid(row=2, column=2, columnspan=2, sticky="w", padx=(8, 0), pady=(10, 0))
+    self.audio_status = hint_label(audio_inner, "", theme=t)
+    self.audio_status.grid(row=2, column=2, columnspan=2, sticky="w", padx=(8, 0), pady=(14, 0))
 
-    refresh_audio_btn = ctk.CTkButton(
+    ctk.CTkButton(
       audio_inner,
       text="Atualizar dispositivos",
-      width=140,
-      height=28,
+      width=160,
+      height=32,
+      corner_radius=t.radius_sm,
+      fg_color=t.surface_alt,
+      border_width=1,
+      border_color=t.border,
       command=self._refresh_audio_devices,
-    )
-    refresh_audio_btn.grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+    ).grid(row=3, column=0, sticky="w", pady=(12, 0))
 
     self._refresh_audio_devices()
 
-    # --- Rodapé: LLM + tema ---
-    footer = ctk.CTkFrame(self.root, corner_radius=12)
-    footer.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 20))
+    # Aba IA
+    ai_inner = ctk.CTkFrame(tab_ai, fg_color="transparent")
+    ai_inner.pack(fill="both", expand=True, padx=12, pady=12)
 
-    llm_left = ctk.CTkFrame(footer, fg_color="transparent")
-    llm_left.pack(side="left", fill="x", expand=True, padx=16, pady=12)
+    ai_top = ctk.CTkFrame(ai_inner, fg_color="transparent")
+    ai_top.pack(fill="x")
 
-    ctk.CTkLabel(
-      llm_left,
-      text="Provedor de IA",
-      font=ctk.CTkFont(size=12, weight="bold"),
+    ai_left = ctk.CTkFrame(ai_top, fg_color="transparent")
+    ai_left.pack(side="left", fill="x", expand=True)
+
+    section_header(
+      ai_left,
+      "Agente de IA",
+      "Resumo, formatação e assistente por palavra-gatilho.",
+      theme=t,
     ).pack(anchor="w")
 
-    llm_row = ctk.CTkFrame(llm_left, fg_color="transparent")
-    llm_row.pack(anchor="w", pady=(6, 0))
+    llm_row = ctk.CTkFrame(ai_left, fg_color="transparent")
+    llm_row.pack(anchor="w", pady=(10, 0))
 
     self.llm_menu = ctk.CTkOptionMenu(
       llm_row,
       values=list(LLM_PROVIDER_LABELS.values()),
-      width=220,
+      width=240,
+      height=34,
       command=self._on_llm_provider_changed,
     )
     self.llm_menu.pack(side="left")
 
-    self.llm_status = ctk.CTkLabel(
-      llm_row,
-      text="",
-      font=ctk.CTkFont(size=11),
-      text_color="gray55",
-      anchor="w",
-    )
-    self.llm_status.pack(side="left", padx=(16, 0))
-
     self.test_llm_btn = ctk.CTkButton(
       llm_row,
-      text="Testar conexão IA",
-      width=150,
-      height=32,
+      text="Testar conexão",
+      width=140,
+      height=34,
+      corner_radius=t.radius_sm,
+      fg_color=t.primary,
+      hover_color=t.primary_hover,
       command=self._test_llm_connection,
     )
-    self.test_llm_btn.pack(side="left", padx=(12, 0))
+    self.test_llm_btn.pack(side="left", padx=(10, 0))
 
-    wake_words_label = " / ".join(self.config.wake_words)
+    self.llm_status = hint_label(ai_left, "", theme=t)
+    self.llm_status.pack(anchor="w", pady=(8, 0))
+
     self.wake_switch = ctk.CTkSwitch(
-      llm_left,
-      text=f"Ativar IA ao ouvir «{wake_words_label}» (resumo + sugestão de resposta)",
+      ai_left,
+      text="Ativar assistente por palavra-gatilho",
+      font=t.ctk_font(t.font_body()),
       command=self._on_wake_assistant_toggled,
     )
-    self.wake_switch.pack(anchor="w", pady=(10, 0))
+    self.wake_switch.pack(anchor="w", pady=(12, 0))
     if self.config.wake_assistant_enabled:
       self.wake_switch.select()
     else:
       self.wake_switch.deselect()
 
-    theme_right = ctk.CTkFrame(footer, fg_color="transparent")
-    theme_right.pack(side="right", padx=16, pady=12)
+    wake_fields = ctk.CTkFrame(ai_left, fg_color="transparent")
+    wake_fields.pack(anchor="w", fill="x", pady=(10, 0))
+    wake_fields.grid_columnconfigure(1, weight=1)
 
-    ctk.CTkLabel(
-      theme_right,
-      text="Aparência",
-      font=ctk.CTkFont(size=12, weight="bold"),
-    ).pack(anchor="e")
+    field_label(wake_fields, "Seu nome na call", theme=t).grid(
+      row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 6),
+    )
+    self.wake_user_entry = ctk.CTkEntry(
+      wake_fields, width=260, height=34, placeholder_text="ex.: CAMILA",
+    )
+    self.wake_user_entry.grid(row=0, column=1, sticky="ew", pady=(0, 6))
+    self.wake_user_entry.insert(0, self.config.wake_user_phrase)
+    self.wake_user_entry.bind("<FocusOut>", lambda _e: self._apply_wake_phrases())
 
+    field_label(wake_fields, "Nome do assistente de IA", theme=t).grid(
+      row=1, column=0, sticky="w", padx=(0, 10),
+    )
+    self.wake_ai_entry = ctk.CTkEntry(
+      wake_fields, width=260, height=34, placeholder_text="ex.: gatinho de IA",
+    )
+    self.wake_ai_entry.grid(row=1, column=1, sticky="ew")
+    self.wake_ai_entry.insert(0, self.config.wake_ai_phrase)
+    self.wake_ai_entry.bind("<FocusOut>", lambda _e: self._apply_wake_phrases())
+
+    self.wake_phrases_hint = hint_label(
+      wake_fields,
+      self._wake_phrases_summary(),
+      theme=t,
+    )
+    self.wake_phrases_hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+    theme_box = ctk.CTkFrame(ai_top, fg_color="transparent")
+    theme_box.pack(side="right", padx=(16, 0))
+
+    field_label(theme_box, "Aparência", theme=t).pack(anchor="e")
     self.theme_seg = ctk.CTkSegmentedButton(
-      theme_right,
+      theme_box,
       values=["Sistema", "Claro", "Escuro"],
+      height=34,
       command=self._on_theme_changed,
     )
     self.theme_seg.pack(pady=(6, 0))
@@ -427,7 +514,18 @@ class DesktopTranscriberApp:
 
   def _set_status(self, status: tuple[str, str]) -> None:
     text, color = status
-    self.status_badge.configure(text=text, fg_color=color)
+    self.status_badge.configure(text=text, fg_color=color, text_color="#ffffff")
+
+  def _show_processing_progress(self, show: bool) -> None:
+    if show:
+      if not self.progress.winfo_ismapped():
+        self.progress.pack(side="right", padx=(0, 10), before=self.status_badge)
+      self.progress.start()
+    else:
+      self.progress.stop()
+      if self.progress.winfo_ismapped():
+        self.progress.pack_forget()
+    self.root.update_idletasks()
 
   def _device_label(self, device: AudioDeviceInfo) -> str:
     suffix = " ★ saída padrão do Windows" if device.is_default else ""
@@ -496,13 +594,13 @@ class DesktopTranscriberApp:
     if not self.system_audio_switch.get():
       self.audio_status.configure(
         text="Só a sua voz. Ative «participantes» para Teams, Meet, Zoom e navegador.",
-        text_color="gray55",
+        text_color=self.theme.text_muted,
       )
       return
     if not self._loopback_devices:
       self.audio_status.configure(
         text="Nenhuma saída de loopback encontrada (Windows WASAPI).",
-        text_color="#dc3545",
+        text_color=self.theme.danger,
       )
       return
     label = self.loopback_menu.get()
@@ -511,7 +609,7 @@ class DesktopTranscriberApp:
         f"Selecionado: {label}. "
         "Teams/Meet/Zoom e o Windows devem usar essa mesma saída de som. Prefira fone."
       ),
-      text_color="gray55",
+      text_color=self.theme.text_muted,
     )
 
   def _build_capture(self) -> AudioCaptureService:
@@ -542,6 +640,9 @@ class DesktopTranscriberApp:
     self.loopback_menu.configure(state=state)
     self.system_audio_switch.configure(state=state)
     self.wake_switch.configure(state=state)
+    entry_state = state
+    self.wake_user_entry.configure(state=entry_state)
+    self.wake_ai_entry.configure(state=entry_state)
     if self._llm_test_running:
       self.test_llm_btn.configure(state="disabled", text="Testando…")
     else:
@@ -576,26 +677,68 @@ class DesktopTranscriberApp:
     self._sync_llm_ui()
 
   def _show_llm_test_results(self, report: str, success: bool) -> None:
+    t = self.theme
     dialog = ctk.CTkToplevel(self.root)
     dialog.title("Teste de conexão — IA")
-    dialog.geometry("560x420")
+    dialog.geometry("580x440")
+    dialog.configure(fg_color=t.bg)
     dialog.transient(self.root)
     dialog.grab_set()
 
-    header = ctk.CTkLabel(
-      dialog,
-      text="Resultado do teste" if success else "Falha na conexão",
-      font=ctk.CTkFont(size=16, weight="bold"),
-      text_color=("#198754" if success else "#dc3545"),
-    )
-    header.pack(anchor="w", padx=20, pady=(16, 8))
+    shell = card(dialog, theme=t)
+    shell.pack(fill="both", expand=True, padx=16, pady=16)
 
-    box = ctk.CTkTextbox(dialog, font=ctk.CTkFont(size=13), wrap="word")
-    box.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+    header = ctk.CTkLabel(
+      shell,
+      text="Conexão OK" if success else "Não foi possível conectar",
+      font=t.ctk_font(t.font_section()),
+      text_color=t.success if success else t.danger,
+    )
+    header.pack(anchor="w", padx=16, pady=(16, 8))
+
+    box = ctk.CTkTextbox(
+      shell,
+      font=t.ctk_font(t.font_body()),
+      wrap="word",
+      fg_color=t.surface_alt,
+      border_color=t.border,
+    )
+    box.pack(fill="both", expand=True, padx=16, pady=(0, 12))
     box.insert("1.0", report)
     box.configure(state="disabled")
 
-    ctk.CTkButton(dialog, text="Fechar", width=120, command=dialog.destroy).pack(pady=(0, 16))
+    ctk.CTkButton(
+      shell,
+      text="Fechar",
+      width=120,
+      height=36,
+      fg_color=t.primary,
+      hover_color=t.primary_hover,
+      command=dialog.destroy,
+    ).pack(pady=(0, 16))
+
+  def _wake_phrases_summary(self) -> str:
+    label = format_wake_phrases_label(self.config.wake_words)
+    return f"Dispara ao ouvir «{label}» na transcrição."
+
+  def _apply_wake_phrases(self) -> None:
+    if self.running:
+      return
+    user = self.wake_user_entry.get().strip()
+    ai = self.wake_ai_entry.get().strip()
+    if not user and not ai:
+      return
+    user = user or self.config.wake_user_phrase
+    ai = ai or self.config.wake_ai_phrase
+    save_wake_phrases(user, ai)
+    words = build_wake_words(user, ai)
+    self.config = replace(
+      self.config,
+      wake_user_phrase=user,
+      wake_ai_phrase=ai,
+      wake_words=words,
+    )
+    self.wake_phrases_hint.configure(text=self._wake_phrases_summary())
 
   def _on_wake_assistant_toggled(self) -> None:
     if self.running:
@@ -634,9 +777,10 @@ class DesktopTranscriberApp:
     ctk.set_appearance_mode(mode)
 
   def start(self) -> None:
-    if self.running:
+    if self.running or self._stopping:
       return
     self.running = True
+    self._stopping = False
     self.lines.clear()
     self._selected_session = None
     self._highlight_session(None)
@@ -648,6 +792,7 @@ class DesktopTranscriberApp:
     save_microphone_device_id(self._selected_mic_id())
     save_loopback_device_id(self._selected_loopback_id())
     save_capture_system_audio(bool(self.system_audio_switch.get()))
+    self._apply_wake_phrases()
 
     self.capture = self._build_capture()
     capture_status = self.capture.start()
@@ -655,10 +800,10 @@ class DesktopTranscriberApp:
     diar_hint = self.pipeline.diarization_status()
     if status_text:
       self.audio_status.configure(
-        text=f"{status_text} · {diar_hint}", text_color="gray55",
+        text=f"{status_text} · {diar_hint}", text_color=self.theme.text_muted,
       )
     else:
-      self.audio_status.configure(text=diar_hint, text_color="gray55")
+      self.audio_status.configure(text=diar_hint, text_color=self.theme.text_muted)
 
     if self.system_audio_switch.get() and not capture_status.sistema.active:
       messagebox.showwarning(
@@ -685,31 +830,59 @@ class DesktopTranscriberApp:
     self._sync_llm_ui()
 
   def stop(self) -> None:
-    if not self.running:
+    if not self.running or self._stopping:
       return
+    self._stopping = True
     self.running = False
-    if self.capture:
-      self.capture.stop()
-    if self.worker:
-      self.worker.join(timeout=3.0)
-    self._segment_queue.put(None)
-    if self._transcriber_thread:
-      self._transcriber_thread.join(timeout=120.0)
+    self.stop_btn.configure(state="disabled")
     self._set_status(self.STATUS_PROCESSING)
-    self.progress.pack(side="right", padx=(0, 12), before=self.status_badge)
-    self.progress.start()
-    self.root.update_idletasks()
+    self._show_processing_progress(True)
+    threading.Thread(target=self._finish_meeting_worker, daemon=True).start()
 
-    raw = "\n".join(f"[{x.when.strftime('%H:%M:%S')}] {x.speaker}: {x.text}" for x in self.lines)
-    formatted = self.processor.refine_transcript(raw)
-    summary = self.processor.summarize(formatted)
-    speakers = self.pipeline.registry.summary() if self.pipeline.registry else []
-    self.store.save(
-      self.current_session, self.lines, formatted, summary, speakers=speakers,
-    )
+  def _finish_meeting_worker(self) -> None:
+    error: str | None = None
+    formatted = ""
+    summary = ""
+    try:
+      if self.capture:
+        self.capture.stop()
+      if self.worker:
+        self.worker.join(timeout=5.0)
+      self._segment_queue.put(None)
+      if self._transcriber_thread:
+        self._transcriber_thread.join(timeout=120.0)
 
-    self.progress.stop()
-    self.progress.pack_forget()
+      raw = "\n".join(
+        f"[{x.when.strftime('%H:%M:%S')}] {x.speaker}: {x.text}" for x in self.lines
+      )
+      formatted = self.processor.refine_transcript(raw)
+      summary = self.processor.summarize(formatted)
+      speakers = self.pipeline.registry.summary() if self.pipeline.registry else []
+      if self.current_session:
+        self.store.save(
+          self.current_session, self.lines, formatted, summary, speakers=speakers,
+        )
+    except Exception as exc:
+      error = str(exc)
+    self.root.after(0, self._on_meeting_finished, formatted, summary, error)
+
+  def _on_meeting_finished(
+    self, formatted: str, summary: str, error: str | None,
+  ) -> None:
+    self._show_processing_progress(False)
+    self._stopping = False
+
+    if error:
+      self._set_status(self.STATUS_IDLE)
+      self.start_btn.configure(state="normal")
+      self.stop_btn.configure(state="disabled")
+      self._sync_llm_ui()
+      messagebox.showerror(
+        "Erro ao salvar",
+        f"Não foi possível concluir o processamento:\n\n{error}",
+      )
+      return
+
     self._set_status(self.STATUS_DONE)
     self.start_btn.configure(state="normal")
     self.stop_btn.configure(state="disabled")
@@ -722,11 +895,11 @@ class DesktopTranscriberApp:
       "━━━ RESUMO DA REUNIÃO ━━━\n\n"
       f"{summary}"
     )
-    self._set_text_content("Resultado da reunião", body, f"{len(self.lines)} falas · arquivos salvos")
-    messagebox.showinfo(
-      "Reunião salva",
-      f"Arquivos gerados em:\n{self.current_session.folder}",
+    self._set_text_content(
+      "Resultado da reunião", body, f"{len(self.lines)} falas · arquivos salvos",
     )
+    folder = self.current_session.folder if self.current_session else ""
+    messagebox.showinfo("Reunião salva", f"Arquivos gerados em:\n{folder}")
 
   def _capture_dispatch_loop(self) -> None:
     """Encaminha segmentos de áudio para transcrição sem bloquear a captura."""
@@ -774,7 +947,7 @@ class DesktopTranscriberApp:
       return
 
     self._wake_state.mark_started()
-    self._set_status(("IA ativada…", "#6f42c1"))
+    self._set_status(("IA ativada…", self.theme.status_ai))
     threading.Thread(
       target=self._run_wake_assistant,
       args=(detected, line),
@@ -785,7 +958,12 @@ class DesktopTranscriberApp:
   def _run_wake_assistant(self, wake_name: str, trigger_line: TranscriptLine) -> None:
     try:
       transcript = format_transcript(self.lines)
-      result = self.processor.assist_on_wake(transcript, wake_name)
+      result = self.processor.assist_on_wake(
+        transcript,
+        wake_name,
+        user_name=self.config.wake_assistant_user_name,
+        is_ai_trigger=is_ai_wake_phrase(wake_name, self.config.wake_ai_phrase),
+      )
       self.root.after(0, self._show_wake_assistant_result, wake_name, trigger_line, result)
     except Exception as exc:
       self.root.after(
@@ -817,8 +995,9 @@ class DesktopTranscriberApp:
       self.live_text.configure(state="disabled")
 
     if self.current_session:
+      slug = re.sub(r"[^\w]+", "_", wake_name.lower(), flags=re.ASCII).strip("_") or "gatilho"
       path = self.current_session.folder / (
-        f"assistente_{wake_name.lower()}_{trigger_line.when.strftime('%H%M%S')}.txt"
+        f"assistente_{slug}_{trigger_line.when.strftime('%H%M%S')}.txt"
       )
       try:
         path.write_text(
@@ -852,9 +1031,9 @@ class DesktopTranscriberApp:
     if not folders:
       self.empty_sessions_label = ctk.CTkLabel(
         self.sessions_scroll,
-        text="Nenhuma sessão ainda.\nInicie uma reunião para começar.",
-        font=ctk.CTkFont(size=12),
-        text_color="gray55",
+        text="Nenhuma reunião salva ainda.\n\nClique em «Iniciar reunião»\npara começar.",
+        font=self.theme.ctk_font(self.theme.font_body()),
+        text_color=self.theme.text_muted,
         justify="center",
       )
       self.empty_sessions_label.pack(pady=24)
@@ -866,13 +1045,14 @@ class DesktopTranscriberApp:
         self.sessions_scroll,
         text=format_session_label(sid),
         anchor="w",
-        height=36,
+        height=40,
+        corner_radius=self.theme.radius_sm,
         fg_color="transparent",
-        text_color=("gray10", "gray90"),
-        hover_color=("gray88", "gray28"),
+        text_color=self.theme.text,
+        hover_color=self.theme.surface_alt,
         command=lambda s=sid: self._open_session(s),
       )
-      btn.pack(fill="x", pady=2, padx=4)
+      btn.pack(fill="x", pady=3, padx=2)
       self._session_buttons[sid] = btn
 
     if self._selected_session and self._selected_session in self._session_buttons:
@@ -880,11 +1060,20 @@ class DesktopTranscriberApp:
     self._sync_delete_buttons()
 
   def _highlight_session(self, session_id: str | None) -> None:
+    t = self.theme
     for sid, btn in self._session_buttons.items():
       if sid == session_id:
-        btn.configure(fg_color=("#dbeafe", "#1e3a5f"), hover_color=("#bfdbfe", "#1e40af"))
+        btn.configure(
+          fg_color=t.primary_soft,
+          hover_color=t.primary_soft,
+          text_color=t.text,
+        )
       else:
-        btn.configure(fg_color="transparent", hover_color=("gray88", "gray28"))
+        btn.configure(
+          fg_color="transparent",
+          hover_color=t.surface_alt,
+          text_color=t.text,
+        )
 
   def _open_session(self, folder_name: str) -> None:
     if self.running:

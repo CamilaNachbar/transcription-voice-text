@@ -395,19 +395,22 @@ python scripts/list-audio-devices.py
 
 Se os participantes não aparecem na transcrição, quase sempre é saída de som diferente entre Teams, Windows e o app.
 
-### Assistente ao ouvir «CAMILA» (palavra-gatilho)
+### Assistente por palavra-gatilho
 
-Com o interruptor **Ativar IA ao ouvir «CAMILA»** ligado (rodapé), sempre que a transcrição detectar o nome **CAMILA** (ou palavras em `WAKE_WORDS` no `.env`):
+Na aba **Inteligência artificial**, configure dois gatilhos (editáveis na interface):
 
-1. A IA analisa a reunião **até aquele momento**.
-2. Gera **resumo** + **sugestão de resposta** (em 1ª pessoa, para você usar na call).
-3. Insere um bloco destacado na transcrição ao vivo e salva `assistente_camila_HHMMSS.txt` na sessão.
+| Campo | Padrão | Quando dispara |
+|-------|--------|----------------|
+| **Seu nome na call** | CAMILA | Alguém te chama pelo nome |
+| **Nome do assistente de IA** | gatinho de IA | Pedem ajuda ao assistente na reunião |
 
-Requer provedor de IA configurado (Flow, Anthropic ou Cursor). Há intervalo mínimo entre ativações (`WAKE_COOLDOWN_SECONDS`, padrão 45 s) para evitar disparos repetidos.
+Com o interruptor ligado, a IA gera **resumo** + **sugestão de resposta** e salva `assistente_*.txt` na sessão.
 
 ```env
 WAKE_ASSISTANT_ENABLED=true
-WAKE_WORDS=CAMILA
+WAKE_USER_PHRASE=CAMILA
+WAKE_AI_PHRASE=gatinho de IA
+WAKE_ASSISTANT_USER_NAME=Camila
 WAKE_COOLDOWN_SECONDS=45
 ```
 

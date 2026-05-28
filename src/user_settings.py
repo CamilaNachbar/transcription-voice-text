@@ -104,3 +104,20 @@ def save_wake_assistant_enabled(enabled: bool) -> None:
     data = _read()
     data["wake_assistant_enabled"] = enabled
     _write(data)
+
+
+def load_wake_user_phrase() -> str | None:
+    value = (_read().get("wake_user_phrase") or "").strip()
+    return value or None
+
+
+def load_wake_ai_phrase() -> str | None:
+    value = (_read().get("wake_ai_phrase") or "").strip()
+    return value or None
+
+
+def save_wake_phrases(user_phrase: str, ai_phrase: str) -> None:
+    data = _read()
+    data["wake_user_phrase"] = user_phrase.strip()
+    data["wake_ai_phrase"] = ai_phrase.strip()
+    _write(data)

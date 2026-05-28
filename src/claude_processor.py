@@ -51,8 +51,15 @@ class ClaudePostProcessor:
         except Exception as exc:
             return f"Resumo indisponível: {exc}"
 
-    def assist_on_wake(self, transcript: str, wake_name: str) -> str:
-        """Resumo da reunião até o momento + sugestão de resposta para quem foi chamado."""
+    def assist_on_wake(
+        self,
+        transcript: str,
+        wake_phrase: str,
+        *,
+        user_name: str = "Camila",
+        is_ai_trigger: bool = False,
+    ) -> str:
+        """Resumo da reunião até o momento + sugestão de resposta."""
         if not transcript.strip():
             return (
                 "Ainda não há transcrição suficiente.\n\n"
@@ -63,16 +70,34 @@ class ClaudePostProcessor:
                 "Assistente indisponível: configure ANTHROPIC_API_KEY, FLOW_API_KEY "
                 "ou CURSOR_API_KEY no .env."
             )
+        if is_ai_trigger:
+            role = (
+                f"Você é o assistente «Gatinho de IA» acionado na reunião. "
+                f"Sua função é apoiar {user_name}, que está na call."
+            )
+            suggest = (
+                f"## Sugestão de resposta\n"
+                f"(o que {user_name} pode dizer agora, em 1ª pessoa, ou uma resposta curta "
+                "do assistente para a sala — educada e direta)"
+            )
+        else:
+            role = (
+                f"Na reunião, alguém chamou «{wake_phrase}». "
+                f"Você apoia {user_name}, que está participando da call."
+            )
+            suggest = (
+                "## Sugestão de resposta\n"
+                f"(texto curto que {user_name} poderia falar agora, em 1ª pessoa, "
+                "educado e direto; se faltar contexto, diga o que perguntar)"
+            )
+
         prompt = (
-            f"Na reunião, alguém chamou ou mencionou «{wake_name}» (palavra-gatilho). "
-            f"Você apoia {wake_name}, que está participando da call.\n\n"
+            f"{role}\n\n"
             "Com base APENAS na transcrição abaixo, responda em português com exatamente "
             "estas duas seções (use os títulos):\n\n"
             "## Resumo até o momento\n"
             "(tópicos em discussão, decisões, pendências — objetivo)\n\n"
-            "## Sugestão de resposta\n"
-            f"(texto curto que {wake_name} poderia falar agora, em 1ª pessoa, "
-            "educado e direto; se faltar contexto, diga o que perguntar para esclarecer)\n\n"
+            f"{suggest}\n\n"
             "Não invente fatos que não estejam na transcrição.\n\n"
             f"Transcrição:\n{transcript}"
         )
