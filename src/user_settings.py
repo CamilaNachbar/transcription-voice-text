@@ -50,3 +50,57 @@ def save_appearance_mode(mode: str) -> None:
     data = _read()
     data["appearance_mode"] = mode
     _write(data)
+
+
+def load_loopback_device_id() -> str | None:
+    value = (_read().get("loopback_device_id") or "").strip()
+    return value or None
+
+
+def save_loopback_device_id(device_id: str | None) -> None:
+    data = _read()
+    if device_id:
+        data["loopback_device_id"] = device_id
+    else:
+        data.pop("loopback_device_id", None)
+    _write(data)
+
+
+def load_microphone_device_id() -> str | None:
+    value = (_read().get("microphone_device_id") or "").strip()
+    return value or None
+
+
+def save_microphone_device_id(device_id: str | None) -> None:
+    data = _read()
+    if device_id:
+        data["microphone_device_id"] = device_id
+    else:
+        data.pop("microphone_device_id", None)
+    _write(data)
+
+
+def load_capture_system_audio() -> bool:
+    value = _read().get("capture_system_audio")
+    if value is None:
+        return True
+    return bool(value)
+
+
+def save_capture_system_audio(enabled: bool) -> None:
+    data = _read()
+    data["capture_system_audio"] = enabled
+    _write(data)
+
+
+def load_wake_assistant_enabled() -> bool | None:
+    value = _read().get("wake_assistant_enabled")
+    if value is None:
+        return None
+    return bool(value)
+
+
+def save_wake_assistant_enabled(enabled: bool) -> None:
+    data = _read()
+    data["wake_assistant_enabled"] = enabled
+    _write(data)

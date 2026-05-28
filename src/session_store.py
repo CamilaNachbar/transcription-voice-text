@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,7 +36,15 @@ class SessionStore:
             summary_path=folder / "resumo.txt",
         )
 
-    def save(self, artifacts: SessionArtifacts, lines: list[TranscriptLine], formatted: str, summary: str) -> None:
+    def save(
+        self,
+        artifacts: SessionArtifacts,
+        lines: list[TranscriptLine],
+        formatted: str,
+        summary: str,
+        *,
+        speakers: list[dict] | None = None,
+    ) -> None:
         raw_text = "\n".join(
             f"[{line.when.strftime('%H:%M:%S')}] {line.speaker}: {line.text}" for line in lines
         )
@@ -48,6 +57,7 @@ class SessionStore:
                     "session_id": artifacts.session_id,
                     "created_at": datetime.now().isoformat(),
                     "entries": [asdict(line) | {"when": line.when.isoformat()} for line in lines],
+                    "speakers": speakers or [],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -57,3 +67,17 @@ class SessionStore:
 
     def list_sessions(self) -> list[Path]:
         return sorted([p for p in self.root.glob("*") if p.is_dir()], reverse=True)
+
+    def delete_session(self, session_id: str) -> bool:
+        folder = self.root / session_id
+        if not folder.is_dir():
+            return False
+        shutil.rmtree(folder)
+        return True
+
+    def delete_all_sessions(self) -> int:
+        removed = 0
+        for folder in self.list_sessions():
+            shutil.rmtree(folder)
+            removed += 1
+        return removed

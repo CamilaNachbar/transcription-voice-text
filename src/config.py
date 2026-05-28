@@ -25,10 +25,35 @@ LLM_PROVIDER_LABELS: dict[LLMProviderMode, str] = {
 @dataclass(frozen=True)
 class AppConfig:
     sample_rate: int = 16000
-    frame_seconds: float = 1.0
+    frame_seconds: float = 0.4
     silence_threshold: float = 0.01
-    silence_timeout_seconds: float = 1.8
+    silence_timeout_seconds: float = 0.75
+    # Áudio remoto (Teams, Meet, Zoom) — pausa um pouco maior, limiar mais baixo
+    system_silence_threshold: float = 0.006
+    system_silence_timeout_seconds: float = 1.15
+    # Segmentação: pré-buffer, hangover e teto para não esperar pausa longa
+    min_segment_seconds: float = 0.35
+    max_segment_seconds: float = 12.0
+    prefix_padding_seconds: float = 0.45
+    speech_hangover_seconds: float = 0.4
+    continue_threshold_ratio: float = 0.55
     whisper_model: str = "small"
+    # Diarização (perfis Participante A, B, C… no áudio da reunião)
+    diarization_enabled: bool = True
+    diarization_min_seconds: float = 2.0
+    diarization_window_seconds: float = 1.0
+    diarization_hop_seconds: float = 0.45
+    diarization_max_windows: int = 14
+    diarization_min_rms: float = 0.004
+    min_speaker_slice_seconds: float = 0.55
+    speaker_match_threshold: float = 0.72
+    within_segment_threshold: float = 0.68
+    max_speakers: int = 8
+    # Assistente por palavra-gatilho (ex.: «CAMILA»)
+    wake_assistant_enabled: bool = True
+    wake_words: tuple[str, ...] = ("CAMILA",)
+    wake_cooldown_seconds: float = 45.0
+    wake_min_lines: int = 1
     session_root: Path = Path("data") / "sessions"
     project_root: Path = Path(__file__).resolve().parent.parent
 
@@ -57,6 +82,58 @@ class AppConfig:
             "anthropic_model",
             os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
         )
+        object.__setattr__(
+            self,
+            "system_silence_threshold",
+            float(os.getenv("SYSTEM_SILENCE_THRESHOLD", "0.006")),
+        )
+        object.__setattr__(
+            self,
+            "system_silence_timeout_seconds",
+            float(os.getenv("SYSTEM_SILENCE_TIMEOUT_SECONDS", "1.15")),
+        )
+        object.__setattr__(self, "frame_seconds", float(os.getenv("FRAME_SECONDS", "0.4")))
+        object.__setattr__(
+            self, "silence_timeout_seconds", float(os.getenv("SILENCE_TIMEOUT_SECONDS", "0.75"))
+        )
+        object.__setattr__(
+            self, "max_segment_seconds", float(os.getenv("MAX_SEGMENT_SECONDS", "12.0"))
+        )
+        object.__setattr__(
+            self, "prefix_padding_seconds", float(os.getenv("PREFIX_PADDING_SECONDS", "0.45"))
+        )
+        object.__setattr__(
+            self, "speech_hangover_seconds", float(os.getenv("SPEECH_HANGOVER_SECONDS", "0.4"))
+        )
+        object.__setattr__(
+            self,
+            "diarization_enabled",
+            os.getenv("DIARIZATION_ENABLED", "true").strip().lower() in ("1", "true", "yes"),
+        )
+        object.__setattr__(
+            self,
+            "diarization_min_seconds",
+            float(os.getenv("DIARIZATION_MIN_SECONDS", "2.0")),
+        )
+        object.__setattr__(
+            self,
+            "speaker_match_threshold",
+            float(os.getenv("SPEAKER_MATCH_THRESHOLD", "0.72")),
+        )
+        object.__setattr__(
+            self,
+            "wake_assistant_enabled",
+            os.getenv("WAKE_ASSISTANT_ENABLED", "true").strip().lower() in ("1", "true", "yes"),
+        )
+        raw_wake = os.getenv("WAKE_WORDS", "CAMILA")
+        words = tuple(w.strip() for w in raw_wake.split(",") if w.strip()) or ("CAMILA",)
+        object.__setattr__(self, "wake_words", words)
+        object.__setattr__(
+            self,
+            "wake_cooldown_seconds",
+            float(os.getenv("WAKE_COOLDOWN_SECONDS", "45")),
+        )
+        object.__setattr__(self, "wake_min_lines", int(os.getenv("WAKE_MIN_LINES", "1")))
 
 
 def _env_llm_provider() -> LLMProviderMode:

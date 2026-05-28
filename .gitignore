@@ -3,4 +3,5 @@
 __pycache__/
 *.pyc
 data/sessions/
+data/models/
 data/user_settings.json

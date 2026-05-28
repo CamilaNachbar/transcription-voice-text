@@ -6,3 +6,5 @@ numpy
 python-dotenv
 soundcard
 soundfile
+speechbrain>=1.0.0
+torchaudio

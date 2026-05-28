@@ -5,7 +5,7 @@ Aplicativo desktop (sem navegador) para capturar áudio de microfone + áudio do
 ## Funcionalidades
 
 - Captura de voz local sem browser.
-- Entrada de microfone e áudio do sistema (loopback), quando suportado.
+- Duas entradas: **sua voz** (microfone) e **participantes** (Teams, Meet, Zoom, áudio do PC).
 - Detecção de silêncio para segmentar fala automaticamente.
 - Transcrição contínua com `faster-whisper` (**sempre local**).
 - Refinamento da transcrição e resumo com IA via **Anthropic** (direto, gateway ou Flow) ou **Cursor SDK**.
@@ -328,6 +328,8 @@ python run.py
 3. Pausas de fala são detectadas automaticamente.
 4. Clique em **Parar e Gerar Arquivos** para salvar transcrição e resumo.
 5. Use a lista à esquerda para abrir sessões antigas por data/hora.
+6. **Apagar selecionada** ou **Apagar todas** remove os arquivos da pasta `data/sessions/` (com confirmação).
+7. **Testar conexão IA** (rodapé) verifica Anthropic/Flow, Cursor e o provedor selecionado na interface.
 6. No rodapé: **Provedor de IA** (Automático / Anthropic / Cursor) e tema **Claro / Escuro / Sistema**.
 7. Preferências ficam em `data/user_settings.json`.
 
@@ -353,8 +355,87 @@ python run.py
 
 ---
 
+## Reuniões online (Teams, Meet, Zoom, navegador)
+
+O app usa **duas entradas ao mesmo tempo**:
+
+| Entrada no app | O que captura | Rótulo na transcrição |
+|----------------|---------------|------------------------|
+| **Microfone** | Sua voz | `Você` |
+| **Participantes (Teams, Meet…)** | Áudio que sai no PC (outros na call) | `Participante A`, `B`, `C`… (por timbre de voz) |
+
+Funciona para **Microsoft Teams**, **Google Meet**, **Zoom**, chamadas no navegador e qualquer app que reproduza som na saída escolhida do Windows.
+
+### Configuração recomendada
+
+1. **Use fone de ouvido** — evita que o microfone grave de novo o áudio dos participantes (eco/duplicata).
+2. **Microsoft Teams** → **Configurações** → **Dispositivos** → defina **Alto-falante** igual ao item **Participantes** no app.
+3. **Windows** → **Configurações** → **Som** → **Saída** = mesmo dispositivo (★ no app = saída padrão do Windows).
+4. No app, deixe ligado **Capturar voz dos participantes** e clique **Iniciar reunião**.
+
+Headsets com dois perfis (ex.: «Chat» vs «Game»): o Teams pode usar um e o Windows outro — alinhe os três (Teams, Windows e app).
+
+### Ajuste fino (opcional, `.env`)
+
+Latência da transcrição ao vivo (valores padrão já otimizados):
+
+```env
+SILENCE_TIMEOUT_SECONDS=0.75    # pausa para fechar um trecho (microfone)
+SYSTEM_SILENCE_TIMEOUT_SECONDS=1.15
+MAX_SEGMENT_SECONDS=12          # envia trecho mesmo sem pausa longa
+PREFIX_PADDING_SECONDS=0.45     # não perde o início da fala
+SYSTEM_SILENCE_THRESHOLD=0.006
+```
+
+### Listar dispositivos
+
+```bash
+python scripts/list-audio-devices.py
+```
+
+Se os participantes não aparecem na transcrição, quase sempre é saída de som diferente entre Teams, Windows e o app.
+
+### Assistente ao ouvir «CAMILA» (palavra-gatilho)
+
+Com o interruptor **Ativar IA ao ouvir «CAMILA»** ligado (rodapé), sempre que a transcrição detectar o nome **CAMILA** (ou palavras em `WAKE_WORDS` no `.env`):
+
+1. A IA analisa a reunião **até aquele momento**.
+2. Gera **resumo** + **sugestão de resposta** (em 1ª pessoa, para você usar na call).
+3. Insere um bloco destacado na transcrição ao vivo e salva `assistente_camila_HHMMSS.txt` na sessão.
+
+Requer provedor de IA configurado (Flow, Anthropic ou Cursor). Há intervalo mínimo entre ativações (`WAKE_COOLDOWN_SECONDS`, padrão 45 s) para evitar disparos repetidos.
+
+```env
+WAKE_ASSISTANT_ENABLED=true
+WAKE_WORDS=CAMILA
+WAKE_COOLDOWN_SECONDS=45
+```
+
+### Perfis de voz (vários participantes)
+
+Com `speechbrain` instalado (`pip install -r requirements.txt`), o app tenta **separar falantes** no áudio da reunião:
+
+- **Você** — sempre o microfone local.
+- **Participante A, B, C…** — vozes distintas no áudio remoto; o perfil é mantido durante a sessão.
+
+Requisitos para boa separação:
+
+- Fone de ouvido (áudio remoto limpo no loopback).
+- Vozes realmente diferentes (não identifica nome real, só timbre).
+- Trechos de reunião com pelo menos ~2 s de fala por pessoa.
+
+Desative no `.env` se quiser só «Participantes (reunião)» genérico:
+
+```env
+DIARIZATION_ENABLED=false
+```
+
+Ajuste sensibilidade: `SPEAKER_MATCH_THRESHOLD=0.72` (menor = mais perfis; maior = agrupa mais).
+
+---
+
 ## Observações importantes
 
-- Loopback de áudio do sistema depende do driver/dispositivo no SO.
+- Captura de loopback: **Windows** com dispositivo correto; no macOS o suporte a áudio do sistema é limitado.
 - Sem provedor de IA, só o cenário **1** pleno; cenários 2–6 precisam das chaves corretas.
 - O título da janela mostra o provedor ativo e o detalhe no rodapé (`Anthropic: ok`, `Cursor: —`, etc.).
