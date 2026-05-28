@@ -10,21 +10,25 @@ from pathlib import Path
 import customtkinter as ctk
 from tkinter import messagebox
 
+from .ai_prompt_library import (
+  AI_USAGE_GUIDE,
+  DEFAULT_CUSTOM_PROMPT,
+  PRESET_LABELS,
+  preset_by_label,
+)
 from .audio_capture import AudioCaptureService, AudioSegment, CaptureStatus
 from .audio_devices import AudioDeviceInfo, list_loopback_devices, list_microphones
 from .claude_processor import ClaudePostProcessor
 from .config import LLM_PROVIDER_LABELS, get_llm_status_detail, load_app_config
 from .llm_connection_test import format_connection_report, run_all_connection_tests
-from .session_store import SessionStore
+from .session_store import SessionStore, open_in_file_manager
 from .transcription_pipeline import TranscriptionPipeline
 from .transcriber import TranscriptLine, WhisperTranscriber
-from .wake_assistant import (
-  WakeTriggerState,
-  build_wake_words,
-  contains_wake_word,
+from .transcript_utils import (
+  AssistantBusyState,
+  AssistantMode,
+  extract_summary_section,
   format_transcript,
-  format_wake_phrases_label,
-  is_ai_wake_phrase,
 )
 from .ui.components import card, field_label, hint_label, section_header
 from .ui.formatting import format_session_label
@@ -34,14 +38,11 @@ from .user_settings import (
   load_capture_system_audio,
   load_loopback_device_id,
   load_microphone_device_id,
-  load_wake_assistant_enabled,
   save_appearance_mode,
   save_capture_system_audio,
   save_llm_provider,
   save_loopback_device_id,
   save_microphone_device_id,
-  save_wake_assistant_enabled,
-  save_wake_phrases,
 )
 
 WELCOME_TEXT = """Olá! Bem-vindo ao Transcritor de Reuniões
@@ -61,7 +62,8 @@ DURANTE A REUNIÃO
 
   • Você — sua voz (microfone)
   • Participante A, B, C… — outras pessoas na call
-  • Configure seu nome e o nome do assistente de IA (aba Inteligência artificial)
+  • Use «Resumir (IA)» e «Responder (IA)» na barra superior durante a gravação
+  • Na aba Inteligência artificial: modelos de pedido em «Enviar pedido à IA»
 
 Dica: use fone de ouvido e alinhe o dispositivo de saída do Windows com a aba Áudio.
 """
@@ -103,12 +105,10 @@ class DesktopTranscriberApp:
     self.current_session = None
     self._selected_session: str | None = None
     self._session_buttons: dict[str, ctk.CTkButton] = {}
-    self._wake_state = WakeTriggerState()
+    self._assistant_state = AssistantBusyState()
+    self._last_assistant_summary: str | None = None
     self._llm_test_running = False
     self._stopping = False
-    wake_pref = load_wake_assistant_enabled()
-    if wake_pref is not None:
-      self.config = replace(self.config, wake_assistant_enabled=wake_pref)
 
     self._build_ui()
     self._refresh_session_list()
@@ -204,11 +204,39 @@ class DesktopTranscriberApp:
       command=self.stop,
       state="disabled",
     )
-    self.stop_btn.pack(side="left")
+    self.stop_btn.pack(side="left", padx=(0, 10))
+
+    self.ai_summarize_btn = ctk.CTkButton(
+      actions,
+      text="Resumir (IA)",
+      width=150,
+      height=44,
+      corner_radius=t.radius_sm,
+      font=t.ctk_font(t.font_button()),
+      fg_color=t.purple,
+      hover_color=t.primary_hover,
+      command=lambda: self._trigger_assistant_manual("summarize"),
+      state="disabled",
+    )
+    self.ai_summarize_btn.pack(side="left", padx=(0, 8))
+
+    self.ai_respond_btn = ctk.CTkButton(
+      actions,
+      text="Responder (IA)",
+      width=160,
+      height=44,
+      corner_radius=t.radius_sm,
+      font=t.ctk_font(t.font_button()),
+      fg_color=t.primary,
+      hover_color=t.primary_hover,
+      command=lambda: self._trigger_assistant_manual("respond"),
+      state="disabled",
+    )
+    self.ai_respond_btn.pack(side="left")
 
     hint_label(
       toolbar_inner,
-      "A transcrição aparece ao lado enquanto você fala.",
+      "Resumir e Responder usam a transcrição ao vivo.",
       theme=t,
     ).pack(side="right", padx=(0, 16))
 
@@ -257,6 +285,19 @@ class DesktopTranscriberApp:
       border_width=1,
       border_color=t.border,
       command=self._refresh_session_list,
+    ).pack(fill="x", pady=(0, 6))
+
+    ctk.CTkButton(
+      session_actions,
+      text="Abrir pasta das transcrições",
+      height=34,
+      corner_radius=t.radius_sm,
+      fg_color=t.primary_soft,
+      hover_color=t.border,
+      text_color=t.text,
+      border_width=1,
+      border_color=t.border,
+      command=self._open_transcription_folder,
     ).pack(fill="x", pady=(0, 6))
 
     self.delete_session_btn = ctk.CTkButton(
@@ -405,7 +446,7 @@ class DesktopTranscriberApp:
     section_header(
       ai_left,
       "Agente de IA",
-      "Resumo, formatação e assistente por palavra-gatilho.",
+      "Resumo, formatação e assistente pelos botões da barra superior.",
       theme=t,
     ).pack(anchor="w")
 
@@ -436,48 +477,85 @@ class DesktopTranscriberApp:
     self.llm_status = hint_label(ai_left, "", theme=t)
     self.llm_status.pack(anchor="w", pady=(8, 0))
 
-    self.wake_switch = ctk.CTkSwitch(
+    hint_label(
       ai_left,
-      text="Ativar assistente por palavra-gatilho",
-      font=t.ctk_font(t.font_body()),
-      command=self._on_wake_assistant_toggled,
-    )
-    self.wake_switch.pack(anchor="w", pady=(12, 0))
-    if self.config.wake_assistant_enabled:
-      self.wake_switch.select()
-    else:
-      self.wake_switch.deselect()
-
-    wake_fields = ctk.CTkFrame(ai_left, fg_color="transparent")
-    wake_fields.pack(anchor="w", fill="x", pady=(10, 0))
-    wake_fields.grid_columnconfigure(1, weight=1)
-
-    field_label(wake_fields, "Seu nome na call", theme=t).grid(
-      row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 6),
-    )
-    self.wake_user_entry = ctk.CTkEntry(
-      wake_fields, width=260, height=34, placeholder_text="ex.: CAMILA",
-    )
-    self.wake_user_entry.grid(row=0, column=1, sticky="ew", pady=(0, 6))
-    self.wake_user_entry.insert(0, self.config.wake_user_phrase)
-    self.wake_user_entry.bind("<FocusOut>", lambda _e: self._apply_wake_phrases())
-
-    field_label(wake_fields, "Nome do assistente de IA", theme=t).grid(
-      row=1, column=0, sticky="w", padx=(0, 10),
-    )
-    self.wake_ai_entry = ctk.CTkEntry(
-      wake_fields, width=260, height=34, placeholder_text="ex.: gatinho de IA",
-    )
-    self.wake_ai_entry.grid(row=1, column=1, sticky="ew")
-    self.wake_ai_entry.insert(0, self.config.wake_ai_phrase)
-    self.wake_ai_entry.bind("<FocusOut>", lambda _e: self._apply_wake_phrases())
-
-    self.wake_phrases_hint = hint_label(
-      wake_fields,
-      self._wake_phrases_summary(),
+      "Durante a gravação: «Resumir (IA)» e «Responder (IA)» na barra superior.",
       theme=t,
+    ).pack(anchor="w", pady=(12, 0))
+
+    custom_box = ctk.CTkFrame(ai_left, fg_color="transparent")
+    custom_box.pack(anchor="w", fill="x", pady=(16, 0))
+
+    section_header(
+      custom_box,
+      "Pedidos à IA sobre a transcrição",
+      "Listas, pautas, follow-up e outros pedidos em português.",
+      theme=t,
+    ).pack(anchor="w")
+
+    hint_label(custom_box, AI_USAGE_GUIDE, theme=t).pack(anchor="w", pady=(8, 0))
+
+    preset_row = ctk.CTkFrame(custom_box, fg_color="transparent")
+    preset_row.pack(anchor="w", fill="x", pady=(10, 0))
+
+    field_label(preset_row, "Modelo de pedido", theme=t).pack(side="left", padx=(0, 10))
+    self.ai_preset_menu = ctk.CTkOptionMenu(
+      preset_row,
+      values=list(PRESET_LABELS),
+      width=300,
+      height=34,
+      command=self._on_ai_preset_selected,
     )
-    self.wake_phrases_hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    self.ai_preset_menu.pack(side="left")
+    if PRESET_LABELS:
+      self.ai_preset_menu.set(PRESET_LABELS[0])
+
+    field_label(custom_box, "Seu pedido (edite à vontade)", theme=t).pack(anchor="w", pady=(10, 4))
+    self.ai_custom_prompt = ctk.CTkTextbox(
+      custom_box,
+      height=96,
+      width=560,
+      corner_radius=t.radius_sm,
+      font=t.ctk_font(t.font_body()),
+      fg_color=t.surface_alt,
+      border_width=1,
+      border_color=t.border,
+    )
+    self.ai_custom_prompt.pack(anchor="w", fill="x", pady=(0, 8))
+    if PRESET_LABELS:
+      self._on_ai_preset_selected(PRESET_LABELS[0])
+    else:
+      self.ai_custom_prompt.insert("1.0", DEFAULT_CUSTOM_PROMPT)
+
+    custom_actions = ctk.CTkFrame(custom_box, fg_color="transparent")
+    custom_actions.pack(anchor="w", fill="x")
+
+    self.ai_custom_send_btn = ctk.CTkButton(
+      custom_actions,
+      text="Enviar pedido à IA",
+      width=200,
+      height=38,
+      corner_radius=t.radius_sm,
+      fg_color=t.purple,
+      hover_color=t.primary_hover,
+      command=self._trigger_assistant_custom,
+      state="disabled",
+    )
+    self.ai_custom_send_btn.pack(side="left")
+
+    ctk.CTkButton(
+      custom_actions,
+      text="Restaurar modelo",
+      width=140,
+      height=38,
+      corner_radius=t.radius_sm,
+      fg_color=t.surface_alt,
+      hover_color=t.border,
+      text_color=t.text,
+      border_width=1,
+      border_color=t.border,
+      command=self._restore_ai_preset_prompt,
+    ).pack(side="left", padx=(8, 0))
 
     theme_box = ctk.CTkFrame(ai_top, fg_color="transparent")
     theme_box.pack(side="right", padx=(16, 0))
@@ -639,15 +717,66 @@ class DesktopTranscriberApp:
     self.mic_menu.configure(state=state)
     self.loopback_menu.configure(state=state)
     self.system_audio_switch.configure(state=state)
-    self.wake_switch.configure(state=state)
-    entry_state = state
-    self.wake_user_entry.configure(state=entry_state)
-    self.wake_ai_entry.configure(state=entry_state)
     if self._llm_test_running:
       self.test_llm_btn.configure(state="disabled", text="Testando…")
     else:
       self.test_llm_btn.configure(state=state, text="Testar conexão IA")
     self._sync_delete_buttons()
+    self._sync_assistant_buttons()
+
+  def _sync_assistant_buttons(self) -> None:
+    if not hasattr(self, "ai_summarize_btn"):
+      return
+    if self._assistant_state.busy:
+      self.ai_summarize_btn.configure(state="disabled")
+      self.ai_respond_btn.configure(state="disabled")
+      if hasattr(self, "ai_custom_send_btn"):
+        self.ai_custom_send_btn.configure(state="disabled")
+      return
+    enabled = bool(
+      self.running and self.lines and self.processor.provider.available,
+    )
+    state = "normal" if enabled else "disabled"
+    self.ai_summarize_btn.configure(state=state)
+    self.ai_respond_btn.configure(state=state)
+    if hasattr(self, "ai_custom_send_btn"):
+      self.ai_custom_send_btn.configure(state=state)
+
+  def _on_ai_preset_selected(self, label: str) -> None:
+    preset = preset_by_label(label)
+    if not preset:
+      return
+    self.ai_custom_prompt.delete("1.0", "end")
+    self.ai_custom_prompt.insert("1.0", preset.instruction)
+
+  def _restore_ai_preset_prompt(self) -> None:
+    label = self.ai_preset_menu.get()
+    preset = preset_by_label(label)
+    if preset:
+      self._on_ai_preset_selected(label)
+    else:
+      self.ai_custom_prompt.delete("1.0", "end")
+      self.ai_custom_prompt.insert("1.0", DEFAULT_CUSTOM_PROMPT)
+
+  def _assistant_preflight(self) -> bool:
+    if not self.running:
+      messagebox.showinfo("Assistente IA", "Inicie uma reunião para usar a IA.")
+      return False
+    if not self.lines:
+      messagebox.showinfo(
+        "Assistente IA",
+        "Ainda não há transcrição. Fale algo e aguarde aparecer no painel central.",
+      )
+      return False
+    if not self.processor.provider.available:
+      messagebox.showwarning(
+        "Assistente IA",
+        "Configure ANTHROPIC_API_KEY, FLOW_API_KEY ou CURSOR_API_KEY no .env.",
+      )
+      return False
+    if self._assistant_state.busy:
+      return False
+    return True
 
   def _test_llm_connection(self) -> None:
     if self.running or self._llm_test_running:
@@ -717,36 +846,6 @@ class DesktopTranscriberApp:
       command=dialog.destroy,
     ).pack(pady=(0, 16))
 
-  def _wake_phrases_summary(self) -> str:
-    label = format_wake_phrases_label(self.config.wake_words)
-    return f"Dispara ao ouvir «{label}» na transcrição."
-
-  def _apply_wake_phrases(self) -> None:
-    if self.running:
-      return
-    user = self.wake_user_entry.get().strip()
-    ai = self.wake_ai_entry.get().strip()
-    if not user and not ai:
-      return
-    user = user or self.config.wake_user_phrase
-    ai = ai or self.config.wake_ai_phrase
-    save_wake_phrases(user, ai)
-    words = build_wake_words(user, ai)
-    self.config = replace(
-      self.config,
-      wake_user_phrase=user,
-      wake_ai_phrase=ai,
-      wake_words=words,
-    )
-    self.wake_phrases_hint.configure(text=self._wake_phrases_summary())
-
-  def _on_wake_assistant_toggled(self) -> None:
-    if self.running:
-      return
-    enabled = bool(self.wake_switch.get())
-    save_wake_assistant_enabled(enabled)
-    self.config = replace(self.config, wake_assistant_enabled=enabled)
-
   def _sync_delete_buttons(self) -> None:
     if self.running:
       self.delete_session_btn.configure(state="disabled")
@@ -755,7 +854,7 @@ class DesktopTranscriberApp:
     has_sessions = bool(self.store.list_sessions())
     self.delete_all_btn.configure(state="normal" if has_sessions else "disabled")
     can_delete_selected = bool(self._selected_session) and (
-      Path(self.config.session_root) / self._selected_session
+      self.store.root / self._selected_session
     ).is_dir()
     self.delete_session_btn.configure(state="normal" if can_delete_selected else "disabled")
 
@@ -769,6 +868,7 @@ class DesktopTranscriberApp:
     self.config = replace(self.config, llm_provider=mode)
     self.processor.reload(self.config)
     self._sync_llm_ui()
+    self._sync_assistant_buttons()
 
   def _on_theme_changed(self, choice: str) -> None:
     mapping = {"Sistema": "system", "Claro": "light", "Escuro": "dark"}
@@ -792,8 +892,6 @@ class DesktopTranscriberApp:
     save_microphone_device_id(self._selected_mic_id())
     save_loopback_device_id(self._selected_loopback_id())
     save_capture_system_audio(bool(self.system_audio_switch.get()))
-    self._apply_wake_phrases()
-
     self.capture = self._build_capture()
     capture_status = self.capture.start()
     status_text = self._format_capture_status(capture_status)
@@ -816,7 +914,8 @@ class DesktopTranscriberApp:
       )
 
     self.pipeline.start_session()
-    self._wake_state = WakeTriggerState()
+    self._assistant_state = AssistantBusyState()
+    self._last_assistant_summary = None
     self._segment_queue = queue.Queue()
     self._transcriber_thread = threading.Thread(
       target=self._transcription_loop, name="transcriber", daemon=True,
@@ -930,61 +1029,116 @@ class DesktopTranscriberApp:
       for line in self.pipeline.process_segment(segment, self.transcriber):
         self.lines.append(line)
         self.root.after(0, self._append_live_line, line)
-        self.root.after(0, self._maybe_trigger_wake_assistant, line)
 
-  def _wake_assistant_enabled_now(self) -> bool:
-    return bool(self.wake_switch.get()) and self.config.wake_assistant_enabled
+  def _trigger_assistant_manual(self, mode: AssistantMode) -> None:
+    if not self._assistant_preflight():
+      return
+    label = "Resumir (IA)" if mode == "summarize" else "Responder (IA)"
+    trigger_line = self.lines[-1]
+    self._start_assistant_job(label, mode, trigger_line)
 
-  def _maybe_trigger_wake_assistant(self, line: TranscriptLine) -> None:
-    if not self.running or not self._wake_assistant_enabled_now():
+  def _trigger_assistant_custom(self) -> None:
+    if not self._assistant_preflight():
       return
-    if len(self.lines) < self.config.wake_min_lines:
+    request = self.ai_custom_prompt.get("1.0", "end").strip()
+    if not request:
+      messagebox.showinfo("Assistente IA", "Escreva um pedido ou escolha um modelo acima.")
       return
-    detected = contains_wake_word(line.text, list(self.config.wake_words))
-    if not detected:
-      return
-    if not self._wake_state.can_trigger(self.config.wake_cooldown_seconds):
-      return
+    preset_label = self.ai_preset_menu.get()
+    short = request.replace("\n", " ")[:48]
+    label = f"Pedido: {preset_label}" if preset_by_label(preset_label) else f"Pedido: {short}…"
+    self._start_assistant_job(
+      label,
+      "summarize",
+      self.lines[-1],
+      custom_request=request,
+    )
 
-    self._wake_state.mark_started()
+  def _start_assistant_job(
+    self,
+    trigger_label: str,
+    mode: AssistantMode,
+    trigger_line: TranscriptLine,
+    *,
+    custom_request: str | None = None,
+  ) -> None:
+    self._assistant_state.mark_started()
+    self._sync_assistant_buttons()
     self._set_status(("IA ativada…", self.theme.status_ai))
     threading.Thread(
-      target=self._run_wake_assistant,
-      args=(detected, line),
-      name="wake-assistant",
+      target=self._run_assistant,
+      args=(trigger_label, mode, trigger_line, custom_request),
+      name="assistant-ia",
       daemon=True,
     ).start()
 
-  def _run_wake_assistant(self, wake_name: str, trigger_line: TranscriptLine) -> None:
+  def _run_assistant(
+    self,
+    trigger_label: str,
+    mode: AssistantMode,
+    trigger_line: TranscriptLine,
+    custom_request: str | None,
+  ) -> None:
+    result_mode: AssistantMode | str = "custom" if custom_request else mode
     try:
       transcript = format_transcript(self.lines)
-      result = self.processor.assist_on_wake(
-        transcript,
-        wake_name,
-        user_name=self.config.wake_assistant_user_name,
-        is_ai_trigger=is_ai_wake_phrase(wake_name, self.config.wake_ai_phrase),
+      if custom_request:
+        result = self.processor.assist_custom(
+          transcript,
+          custom_request,
+          user_name=self.config.assistant_user_name,
+          summary_context=self._last_assistant_summary,
+        )
+      else:
+        summary_ctx = self._last_assistant_summary if mode == "respond" else None
+        result = self.processor.assist_quick(
+          transcript,
+          trigger_label,
+          user_name=self.config.assistant_user_name,
+          mode=mode,
+          summary_context=summary_ctx,
+        )
+      self.root.after(
+        0,
+        self._show_assistant_result,
+        trigger_label,
+        trigger_line,
+        result,
+        result_mode,
       )
-      self.root.after(0, self._show_wake_assistant_result, wake_name, trigger_line, result)
     except Exception as exc:
       self.root.after(
         0,
-        self._show_wake_assistant_result,
-        wake_name,
+        self._show_assistant_result,
+        trigger_label,
         trigger_line,
         f"Erro ao consultar IA: {exc}",
+        result_mode,
       )
     finally:
-      self._wake_state.mark_finished()
+      self._assistant_state.mark_finished()
       if self.running:
         self.root.after(0, lambda: self._set_status(self.STATUS_RECORDING))
+      self.root.after(0, self._sync_assistant_buttons)
 
-  def _show_wake_assistant_result(
-    self, wake_name: str, trigger_line: TranscriptLine, result: str,
+  def _show_assistant_result(
+    self,
+    trigger_label: str,
+    trigger_line: TranscriptLine,
+    result: str,
+    mode: AssistantMode | str,
   ) -> None:
     when = trigger_line.when.strftime("%H:%M:%S")
+    if mode == "respond":
+      action = "Resumo + sugestão de resposta"
+    elif mode == "custom":
+      action = "Pedido personalizado à IA"
+    else:
+      action = "Resumo da reunião"
     block = (
       f"\n{'═' * 52}\n"
-      f"🎙 IA ativada — «{wake_name}» mencionado às {when}\n"
+      f"IA — «{trigger_label}» às {when}\n"
+      f"{action}\n"
       f"{'═' * 52}\n\n"
       f"{result.strip()}\n\n"
     )
@@ -994,23 +1148,34 @@ class DesktopTranscriberApp:
     if self.running:
       self.live_text.configure(state="disabled")
 
+    summary = extract_summary_section(result)
+    if summary:
+      self._last_assistant_summary = summary
+
     if self.current_session:
-      slug = re.sub(r"[^\w]+", "_", wake_name.lower(), flags=re.ASCII).strip("_") or "gatilho"
+      slug = re.sub(r"[^\w]+", "_", trigger_label.lower(), flags=re.ASCII).strip("_") or "ia"
       path = self.current_session.folder / (
         f"assistente_{slug}_{trigger_line.when.strftime('%H%M%S')}.txt"
       )
       try:
         path.write_text(
-          f"Gatilho: {wake_name} às {when}\n\n{result}",
+          f"IA: {trigger_label} às {when}\n\n{result}",
           encoding="utf-8",
         )
       except OSError:
         pass
 
+    self._sync_assistant_buttons()
+    if mode == "custom":
+      detail = "Resposta adicionada à transcrição ao vivo."
+    elif mode == "respond":
+      detail = "Resumo e sugestão adicionados à transcrição ao vivo."
+    else:
+      detail = "Resumo adicionado à transcrição ao vivo."
+    title = trigger_label if len(trigger_label) <= 48 else f"{trigger_label[:45]}…"
     messagebox.showinfo(
-      f"Assistente — {wake_name}",
-      "Resumo e sugestão de resposta adicionados à transcrição ao vivo.\n\n"
-      "Role o painel central para ver o bloco destacado.",
+      f"Assistente — {title}",
+      f"{detail}\n\nRole o painel central para ver.",
     )
 
   def _append_live_line(self, line: TranscriptLine) -> None:
@@ -1021,6 +1186,7 @@ class DesktopTranscriberApp:
     )
     self.live_text.see("end")
     self.line_count_label.configure(text=f"{len(self.lines)} falas")
+    self._sync_assistant_buttons()
 
   def _refresh_session_list(self) -> None:
     for widget in self.sessions_scroll.winfo_children():
@@ -1075,12 +1241,29 @@ class DesktopTranscriberApp:
           text_color=t.text,
         )
 
+  def _transcription_folder_target(self) -> Path:
+    if self.running and self.current_session:
+      return self.current_session.folder
+    if self._selected_session:
+      return self.store.root / self._selected_session
+    return self.store.root
+
+  def _open_transcription_folder(self) -> None:
+    folder = self._transcription_folder_target()
+    try:
+      open_in_file_manager(folder)
+    except OSError as exc:
+      messagebox.showerror(
+        "Abrir pasta",
+        f"Não foi possível abrir:\n{folder}\n\n{exc}",
+      )
+
   def _open_session(self, folder_name: str) -> None:
     if self.running:
       return
     self._selected_session = folder_name
     self._highlight_session(folder_name)
-    folder = Path(self.config.session_root) / folder_name
+    folder = self.store.root / folder_name
     formatted = folder / "transcricao_formatada.txt"
     summary = folder / "resumo.txt"
     parts: list[str] = []

@@ -395,23 +395,30 @@ python scripts/list-audio-devices.py
 
 Se os participantes não aparecem na transcrição, quase sempre é saída de som diferente entre Teams, Windows e o app.
 
-### Assistente por palavra-gatilho
+### Assistente de IA (botões)
 
-Na aba **Inteligência artificial**, configure dois gatilhos (editáveis na interface):
+Durante a gravação, use na barra superior:
 
-| Campo | Padrão | Quando dispara |
-|-------|--------|----------------|
-| **Seu nome na call** | CAMILA | Alguém te chama pelo nome |
-| **Nome do assistente de IA** | gatinho de IA | Pedem ajuda ao assistente na reunião |
+| Botão | O que a IA faz |
+|-------|----------------|
+| **Resumir (IA)** | Só o resumo da reunião até o momento |
+| **Responder (IA)** | Resumo + sugestão do que você pode falar (usa o último resumo gerado, se existir) |
 
-Com o interruptor ligado, a IA gera **resumo** + **sugestão de resposta** e salva `assistente_*.txt` na sessão.
+O resultado aparece na transcrição ao vivo e em `assistente_*.txt`.
+
+### Pedidos personalizados (listas, pautas, e-mail…)
+
+Na aba **Inteligência artificial**, seção **Pedidos à IA sobre a transcrição**:
+
+1. Durante a gravação, escolha um **modelo de pedido** (lista de tarefas, pauta da próxima reunião, e-mail de follow-up, etc.) ou escreva seu pedido em português.
+2. Edite o texto se quiser ser mais específico.
+3. Clique em **Enviar pedido à IA**.
+
+A IA usa só o que já foi transcrito (e o último resumo gerado, se existir). Se faltar informação, ela sugere o que perguntar na reunião em vez de inventar.
 
 ```env
-WAKE_ASSISTANT_ENABLED=true
-WAKE_USER_PHRASE=CAMILA
-WAKE_AI_PHRASE=gatinho de IA
-WAKE_ASSISTANT_USER_NAME=Camila
-WAKE_COOLDOWN_SECONDS=45
+# Nome usado nas sugestões de resposta da IA (opcional)
+ASSISTANT_USER_NAME=Camila
 ```
 
 ### Perfis de voz (vários participantes)

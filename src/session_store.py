@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,9 +22,24 @@ class SessionArtifacts:
     summary_path: Path
 
 
+def open_in_file_manager(path: Path) -> None:
+    """Abre uma pasta no Explorer (Windows), Finder (macOS) ou gerenciador padrão (Linux)."""
+    target = path.resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        os.startfile(target)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", target], check=False)
+    else:
+        subprocess.Popen(["xdg-open", target], check=False)
+
+
 class SessionStore:
     def __init__(self, config: AppConfig):
-        self.root = config.session_root
+        root = config.session_root
+        if not root.is_absolute():
+            root = config.project_root / root
+        self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def new_session(self) -> SessionArtifacts:
