@@ -1,0 +1,8 @@
+anthropic
+customtkinter
+cursor-sdk
+faster-whisper
+numpy
+python-dotenv
+soundcard
+soundfile
