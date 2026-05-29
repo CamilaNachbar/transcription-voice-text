@@ -92,3 +92,13 @@ def save_capture_system_audio(enabled: bool) -> None:
     data["capture_system_audio"] = enabled
     _write(data)
 
+
+def load_chrome_meeting_url() -> str | None:
+    value = (_read().get("chrome_meeting_url") or "").strip()
+    return value or None
+
+
+def save_chrome_meeting_url(url: str) -> None:
+    data = _read()
+    data["chrome_meeting_url"] = url.strip()
+    _write(data)

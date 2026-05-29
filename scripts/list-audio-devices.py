@@ -28,7 +28,7 @@ def main() -> int:
     )
     loops = list_loopback_devices()
     if not loops:
-        print("(nenhum — loopback completo só no Windows)")
+        print("(nenhum — no Mac instale BlackHole; no Windows use WASAPI loopback)")
     for d in loops:
         mark = " [saída padrão do Windows]" if d.is_default else ""
         print(f"  {d.name}{mark}\n    id: {d.id}\n")

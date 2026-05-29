@@ -135,11 +135,20 @@ class AudioCaptureService:
     def _capture_system(self) -> None:
         device = resolve_loopback(self.loopback_device_id)
         if device is None:
-            self.status.sistema.error = (
-                "Nenhum dispositivo de loopback encontrado. "
-                "No Windows, use a lista «Participantes» e o mesmo dispositivo "
-                "definido em Configurações → Som → Saída."
-            )
+            import sys
+
+            if sys.platform == "darwin":
+                self.status.sistema.error = (
+                    "Nenhum BlackHole/Loopback encontrado. "
+                    "Instale BlackHole, crie saída múltipla no Áudio MIDI e selecione em «Participantes». "
+                    "Aba Áudio → «Ajuda áudio (Mac)»."
+                )
+            else:
+                self.status.sistema.error = (
+                    "Nenhum dispositivo de loopback encontrado. "
+                    "No Windows, use a lista «Participantes» e o mesmo dispositivo "
+                    "definido em Configurações → Som → Saída."
+                )
             return
         self._capture_source(
             source_name=SOURCE_MEETING,

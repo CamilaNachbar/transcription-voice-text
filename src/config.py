@@ -51,6 +51,8 @@ class AppConfig:
     max_speakers: int = 8
     # Nome usado nas sugestões de resposta da IA
     assistant_user_name: str = "Camila"
+    # URL aberta pelo botão «Chrome + gravar»
+    chrome_meeting_url: str = "https://meet.google.com/new"
     session_root: Path = Path("data") / "sessions"
     project_root: Path = Path(__file__).resolve().parent.parent
 
@@ -123,6 +125,12 @@ class AppConfig:
             or "Camila"
         ).strip() or "Camila"
         object.__setattr__(self, "assistant_user_name", assistant_name)
+        object.__setattr__(
+            self,
+            "chrome_meeting_url",
+            os.getenv("CHROME_MEETING_URL", "https://meet.google.com/new").strip()
+            or "https://meet.google.com/new",
+        )
 
 
 def _env_llm_provider() -> LLMProviderMode:
@@ -134,9 +142,12 @@ def _env_llm_provider() -> LLMProviderMode:
 
 def load_app_config() -> AppConfig:
     """Config base (.env) com preferência da UI, se existir."""
-    from .user_settings import load_llm_provider
+    from .user_settings import load_chrome_meeting_url, load_llm_provider
 
     config = AppConfig()
+    chrome_url = load_chrome_meeting_url()
+    if chrome_url is not None:
+        config = replace(config, chrome_meeting_url=chrome_url)
     override = load_llm_provider()
     if override is not None:
         return replace(config, llm_provider=override)

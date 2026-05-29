@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import re
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -17,10 +18,17 @@ from .ai_prompt_library import (
   preset_by_label,
 )
 from .audio_capture import AudioCaptureService, AudioSegment, CaptureStatus
-from .audio_devices import AudioDeviceInfo, list_loopback_devices, list_microphones
+from .audio_devices import (
+  AudioDeviceInfo,
+  list_loopback_devices,
+  list_microphones,
+  platform_loopback_kind,
+)
+from .mac_audio_guide import MAC_PARTICIPANT_SETUP
 from .claude_processor import ClaudePostProcessor
 from .config import LLM_PROVIDER_LABELS, get_llm_status_detail, load_app_config
 from .llm_connection_test import format_connection_report, run_all_connection_tests
+from .chrome_launcher import open_chrome
 from .session_store import SessionStore, open_in_file_manager
 from .transcription_pipeline import TranscriptionPipeline
 from .transcriber import TranscriptLine, WhisperTranscriber
@@ -40,6 +48,7 @@ from .user_settings import (
   load_microphone_device_id,
   save_appearance_mode,
   save_capture_system_audio,
+  save_chrome_meeting_url,
   save_llm_provider,
   save_loopback_device_id,
   save_microphone_device_id,
@@ -53,7 +62,7 @@ Este aplicativo transcreve suas calls em tempo real e gera resumo com IA.
 COMO COMEÇAR
 
   1. Confira as abas «Áudio» e «Inteligência artificial» abaixo
-  2. Clique em «Iniciar reunião»
+  2. Clique em «Iniciar reunião» ou «Chrome + gravar» (Meet no navegador)
   3. Participe da call (Teams, Meet, Zoom ou navegador)
   4. Clique em «Parar e salvar» para gerar os arquivos .txt
 
@@ -65,7 +74,7 @@ DURANTE A REUNIÃO
   • Use «Resumir (IA)» e «Responder (IA)» na barra superior durante a gravação
   • Na aba Inteligência artificial: modelos de pedido em «Enviar pedido à IA»
 
-Dica: use fone de ouvido e alinhe o dispositivo de saída do Windows com a aba Áudio.
+Dica: no Windows, alinhe a saída de som com a aba Áudio; no Mac, veja «Ajuda áudio (Mac)».
 """
 
 
@@ -191,6 +200,22 @@ class DesktopTranscriberApp:
       command=self.start,
     )
     self.start_btn.pack(side="left", padx=(0, 10))
+
+    self.chrome_start_btn = ctk.CTkButton(
+      actions,
+      text="Chrome + gravar",
+      width=170,
+      height=44,
+      corner_radius=t.radius_sm,
+      font=t.ctk_font(t.font_button()),
+      fg_color=t.surface_alt,
+      hover_color=t.border,
+      text_color=t.text,
+      border_width=1,
+      border_color=t.border,
+      command=self._start_with_chrome,
+    )
+    self.chrome_start_btn.pack(side="left", padx=(0, 10))
 
     self.stop_btn = ctk.CTkButton(
       actions,
@@ -384,7 +409,7 @@ class DesktopTranscriberApp:
     section_header(
       audio_inner,
       "Dispositivos de captura",
-      "Use o mesmo alto-falante do Teams/Windows em «Participantes».",
+      "Windows: mesma saída do sistema. Mac: BlackHole em «Participantes».",
       theme=t,
     ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 12))
 
@@ -430,6 +455,46 @@ class DesktopTranscriberApp:
       border_color=t.border,
       command=self._refresh_audio_devices,
     ).grid(row=3, column=0, sticky="w", pady=(12, 0))
+
+    mac_help_row = ctk.CTkFrame(audio_inner, fg_color="transparent")
+    mac_help_row.grid(row=3, column=1, columnspan=3, sticky="w", pady=(12, 0))
+    if sys.platform == "darwin":
+      ctk.CTkButton(
+        mac_help_row,
+        text="Ajuda áudio (Mac)",
+        width=160,
+        height=32,
+        corner_radius=t.radius_sm,
+        fg_color=t.primary_soft,
+        hover_color=t.border,
+        text_color=t.text,
+        border_width=1,
+        border_color=t.border,
+        command=self._show_mac_audio_help,
+      ).pack(side="left")
+
+    chrome_row = ctk.CTkFrame(audio_inner, fg_color="transparent")
+    chrome_row.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    chrome_row.grid_columnconfigure(1, weight=1)
+
+    field_label(chrome_row, "URL no Chrome", theme=t).grid(
+      row=0, column=0, sticky="w", padx=(0, 10),
+    )
+    self.chrome_url_entry = ctk.CTkEntry(
+      chrome_row,
+      width=420,
+      height=34,
+      placeholder_text="https://meet.google.com/new",
+    )
+    self.chrome_url_entry.grid(row=0, column=1, sticky="ew")
+    self.chrome_url_entry.insert(0, self.config.chrome_meeting_url)
+    self.chrome_url_entry.bind("<FocusOut>", lambda _e: self._apply_chrome_url())
+
+    hint_label(
+      chrome_row,
+      "«Chrome + gravar» abre esta página e inicia a transcrição aqui (não grava dentro do Chrome).",
+      theme=t,
+    ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
     self._refresh_audio_devices()
 
@@ -606,7 +671,14 @@ class DesktopTranscriberApp:
     self.root.update_idletasks()
 
   def _device_label(self, device: AudioDeviceInfo) -> str:
-    suffix = " ★ saída padrão do Windows" if device.is_default else ""
+    if device.is_default:
+      suffix = (
+        " ★ BlackHole recomendado"
+        if sys.platform == "darwin"
+        else " ★ saída padrão do Windows"
+      )
+    else:
+      suffix = ""
     return f"{device.name}{suffix}"
 
   def _refresh_audio_devices(self) -> None:
@@ -676,19 +748,31 @@ class DesktopTranscriberApp:
       )
       return
     if not self._loopback_devices:
-      self.audio_status.configure(
-        text="Nenhuma saída de loopback encontrada (Windows WASAPI).",
-        text_color=self.theme.danger,
-      )
+      if sys.platform == "darwin":
+        self.audio_status.configure(
+          text="Mac: instale BlackHole e clique em «Ajuda áudio (Mac)».",
+          text_color=self.theme.danger,
+        )
+      else:
+        self.audio_status.configure(
+          text="Nenhuma saída de loopback encontrada (Windows WASAPI).",
+          text_color=self.theme.danger,
+        )
       return
     label = self.loopback_menu.get()
-    self.audio_status.configure(
-      text=(
+    if platform_loopback_kind() == "virtual":
+      hint = (
+        f"Mac — {label}. Saída do sistema deve ir para BlackHole (saída múltipla). Prefira fone."
+      )
+    else:
+      hint = (
         f"Selecionado: {label}. "
         "Teams/Meet/Zoom e o Windows devem usar essa mesma saída de som. Prefira fone."
-      ),
-      text_color=self.theme.text_muted,
-    )
+      )
+    self.audio_status.configure(text=hint, text_color=self.theme.text_muted)
+
+  def _show_mac_audio_help(self) -> None:
+    messagebox.showinfo("Áudio no macOS", MAC_PARTICIPANT_SETUP)
 
   def _build_capture(self) -> AudioCaptureService:
     return AudioCaptureService(
@@ -717,6 +801,10 @@ class DesktopTranscriberApp:
     self.mic_menu.configure(state=state)
     self.loopback_menu.configure(state=state)
     self.system_audio_switch.configure(state=state)
+    if hasattr(self, "chrome_url_entry"):
+      self.chrome_url_entry.configure(state=state)
+    if hasattr(self, "chrome_start_btn"):
+      self.chrome_start_btn.configure(state=state)
     if self._llm_test_running:
       self.test_llm_btn.configure(state="disabled", text="Testando…")
     else:
@@ -925,8 +1013,40 @@ class DesktopTranscriberApp:
     self.worker.start()
     self._set_status(self.STATUS_RECORDING)
     self.start_btn.configure(state="disabled")
+    self.chrome_start_btn.configure(state="disabled")
     self.stop_btn.configure(state="normal")
     self._sync_llm_ui()
+
+  def _apply_chrome_url(self) -> None:
+    if self.running:
+      return
+    url = self.chrome_url_entry.get().strip()
+    if not url:
+      return
+    save_chrome_meeting_url(url)
+    self.config = replace(self.config, chrome_meeting_url=url)
+
+  def _chrome_meeting_url(self) -> str:
+    url = self.chrome_url_entry.get().strip() if hasattr(self, "chrome_url_entry") else ""
+    return url or self.config.chrome_meeting_url
+
+  def _start_with_chrome(self) -> None:
+    if self.running or self._stopping:
+      return
+    self._apply_chrome_url()
+    if not self.system_audio_switch.get():
+      self.system_audio_switch.select()
+      save_capture_system_audio(True)
+    ok, message = open_chrome(self._chrome_meeting_url())
+    if not ok:
+      messagebox.showerror("Chrome", message)
+      return
+    self.start()
+    if self.running:
+      self.audio_status.configure(
+        text=f"{message} · Entre na reunião no Chrome.",
+        text_color=self.theme.text_muted,
+      )
 
   def stop(self) -> None:
     if not self.running or self._stopping:

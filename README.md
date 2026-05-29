@@ -45,6 +45,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+Para transcrever **participantes** da reunião no Mac, configure o [BlackHole](#macos--configuração-do-blackhole) antes de usar o app.
+
 Depois da instalação, escolha **um** cenário de IA na seção seguinte e edite o `.env` (ou variáveis de ambiente). Não é necessário configurar todos.
 
 ---
@@ -364,14 +366,29 @@ O app usa **duas entradas ao mesmo tempo**:
 | **Microfone** | Sua voz | `Você` |
 | **Participantes (Teams, Meet…)** | Áudio que sai no PC (outros na call) | `Participante A`, `B`, `C`… (por timbre de voz) |
 
-Funciona para **Microsoft Teams**, **Google Meet**, **Zoom**, chamadas no navegador e qualquer app que reproduza som na saída escolhida do Windows.
+Funciona para **Microsoft Teams**, **Google Meet**, **Zoom**, chamadas no navegador e qualquer app que reproduza som na saída do sistema.
 
-### Configuração recomendada
+- **Windows:** loopback WASAPI — veja [Configuração recomendada](#configuração-recomendada) abaixo.
+- **macOS:** configure o [BlackHole](#macos--configuração-do-blackhole) antes de gravar participantes.
+
+### Configuração recomendada (Windows)
 
 1. **Use fone de ouvido** — evita que o microfone grave de novo o áudio dos participantes (eco/duplicata).
 2. **Microsoft Teams** → **Configurações** → **Dispositivos** → defina **Alto-falante** igual ao item **Participantes** no app.
 3. **Windows** → **Configurações** → **Som** → **Saída** = mesmo dispositivo (★ no app = saída padrão do Windows).
 4. No app, deixe ligado **Capturar voz dos participantes** e clique **Iniciar reunião**.
+
+No **Mac**, siga o guia [macOS — configuração do BlackHole](#macos--configuração-do-blackhole) em vez desta lista.
+
+### Google Meet no Chrome
+
+O botão **Chrome + gravar** abre o Chrome na URL configurada (padrão: Google Meet) e inicia a transcrição **neste app**. Ele **não** aciona a gravação interna do navegador — a captura continua sendo microfone + áudio do PC, como acima.
+
+Na aba **Áudio**, edite **URL no Chrome** (ex.: `https://teams.microsoft.com`, `https://zoom.us/j/...`) ou use no `.env`:
+
+```env
+CHROME_MEETING_URL=https://meet.google.com/new
+```
 
 Headsets com dois perfis (ex.: «Chat» vs «Game»): o Teams pode usar um e o Windows outro — alinhe os três (Teams, Windows e app).
 
@@ -444,8 +461,110 @@ Ajuste sensibilidade: `SPEAKER_MATCH_THRESHOLD=0.72` (menor = mais perfis; maior
 
 ---
 
+## macOS — configuração do BlackHole
+
+No Mac **não há** loopback nativo como no Windows (WASAPI). Para transcrever **outras pessoas na call**, o áudio da reunião precisa passar pelo **BlackHole** (ou dispositivo virtual equivalente). O app lê o BlackHole na lista **Participantes**.
+
+```
+Reunião (Meet/Teams/Zoom)
+        ↓
+Saída do Mac = «Dispositivo com saída múltipla»
+        ├─→ Fones/alto-falante (você ouve)
+        └─→ BlackHole 2ch (o app grava daqui)
+```
+
+### 1. Instalar o BlackHole
+
+1. Baixe e instale o **[BlackHole 2ch](https://existential.audio/blackhole/)** (versão gratuita; use **2ch** para reuniões).
+2. Se o instalador pedir, **reinicie o Mac**.
+3. Em **Ajustes do Sistema → Privacidade e segurança → Microfone**, permita:
+   - o **Terminal** (se roda `python run.py` pelo terminal), ou
+   - o interpretador Python / IDE que você usa.
+
+Sem permissão de microfone, o app não consegue abrir o BlackHole como entrada de áudio.
+
+### 2. Criar saída múltipla (Áudio MIDI)
+
+Você precisa **ouvir** a reunião e **enviar cópia** do som para o BlackHole.
+
+1. Abra **Configuração de Áudio MIDI**  
+   - Spotlight: digite `Audio MIDI Setup` ou `Configuração de Áudio MIDI`.
+2. No canto inferior esquerdo, clique em **+** → **Criar dispositivo com saída múltipla** (Create Multi-Output Device).
+3. Marque **as duas** opções (ordem sugerida):
+   - **BlackHole 2ch**
+   - Seus **fones** ou **alto-falante** (o que você usa para ouvir)
+4. Opcional: clique com o botão direito no dispositivo criado → **Usar este dispositivo para saída de som** (Use This Device For Sound Output).
+5. Renomeie para algo claro, ex.: `Reunião + BlackHole`.
+
+**Importante:** marque só **BlackHole 2ch**, não «BlackHole 16ch», a menos que você saiba que precisa de mais canais.
+
+### 3. Definir saída do sistema
+
+1. **Ajustes do Sistema → Som → Saída** → escolha o dispositivo **Reunião + BlackHole** (sua saída múltipla).
+2. Ajuste o volume do sistema; o volume dos fones costuma seguir a saída múltipla.
+
+Todo áudio do Mac (navegador, Teams, Zoom, Meet) deve passar por essa saída enquanto você grava.
+
+### 4. Configurar a reunião (Meet / Teams / Zoom)
+
+Alinhe o app da reunião com a **mesma** saída:
+
+| App | Onde configurar |
+|-----|-----------------|
+| **Google Meet** (Chrome) | Três pontos → **Configurações** → **Áudio** → **Alto-falante** = saída múltipla ou «Padrão do sistema» |
+| **Microsoft Teams** | **Configurações** → **Dispositivos** → **Alto-falante** = mesmo dispositivo |
+| **Zoom** | **Configurações de áudio** → **Alto-falante** = mesmo dispositivo |
+
+Use **fone de ouvido** na saída múltipla para reduzir eco no seu microfone.
+
+### 5. Configurar este app
+
+1. Abra o transcritor: `python run.py`
+2. Aba **Áudio**:
+   - **Microfone** → seu microfone real
+   - Ative **Capturar voz dos participantes (Teams, Meet, Zoom…)**
+   - **Participantes na call** → **BlackHole 2ch**
+3. Se **BlackHole 2ch** não aparecer → **Atualizar dispositivos** (ou reinicie o app após instalar o BlackHole).
+4. Botão **Ajuda áudio (Mac)** — mesmo conteúdo resumido na interface.
+5. **Iniciar reunião** ou **Chrome + gravar** (abre o Meet no Chrome e já inicia a transcrição).
+
+Confirme os dispositivos no terminal:
+
+```bash
+python scripts/list-audio-devices.py
+```
+
+Na seção **Participantes**, deve listar algo como `BlackHole 2ch`.
+
+### 6. Teste rápido antes da call
+
+1. Com a saída múltipla ativa, abra um vídeo no YouTube ou música no Spotify.
+2. Inicie **Iniciar reunião** no app (pode parar em seguida).
+3. Se a transcrição mostrar falas de **Participante A** (ou texto do áudio remoto), o roteamento está certo.
+4. Se só aparecer **Você**, o som ainda não está chegando ao BlackHole — revise os passos 2 e 3.
+
+### Problemas comuns (BlackHole)
+
+| Sintoma | O que verificar |
+|---------|------------------|
+| BlackHole não aparece no app | Reinicie o Mac; reinstale o driver; **Atualizar dispositivos**; permissão de **Microfone** |
+| Só transcreve «Você» | Saída do Mac não é a saída múltipla; Meet/Teams usa outro alto-falante |
+| Áudio baixo ou mudo nos fones | Na saída múltipla, marque os fones **e** o BlackHole; aumente volume do sistema |
+| Eco / duplicata na transcrição | Use fone; microfone longe do alto-falante |
+| BlackHole instalado mas «não funciona» | Criou **saída múltipla**? Sem ela, o som vai só aos fones e não entra no BlackHole |
+
+### Alternativas ao BlackHole
+
+| Opção | Quando usar |
+|-------|-------------|
+| **[Loopback](https://rogueamoeba.com/loopback/)** (pago) | BlackHole instável ou roteamento complexo no seu Mac |
+| **Só microfone** | Desative «Capturar participantes» — transcreve apenas sua voz |
+| **Windows** | Loopback WASAPI nativo, sem BlackHole (veja [Configuração recomendada](#configuração-recomendada)) |
+
+---
+
 ## Observações importantes
 
-- Captura de loopback: **Windows** com dispositivo correto; no macOS o suporte a áudio do sistema é limitado.
+- **Windows:** loopback WASAPI na lista «Participantes». **macOS:** BlackHole/Loopback como entrada virtual.
 - Sem provedor de IA, só o cenário **1** pleno; cenários 2–6 precisam das chaves corretas.
 - O título da janela mostra o provedor ativo e o detalhe no rodapé (`Anthropic: ok`, `Cursor: —`, etc.).
